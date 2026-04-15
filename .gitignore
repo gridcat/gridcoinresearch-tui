@@ -1,0 +1,9 @@
+dist/
+*.exe
+*.test
+*.out
+coverage.txt
+gridcoinresearch-tui
+!gridcoinresearch-tui/
+.idea/
+.vscode/
