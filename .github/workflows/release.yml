@@ -44,5 +44,4 @@ jobs:
       - name: Stamp release artifacts on Gridcoin
         uses: gridcat/gridcoin-stamp-action@v1
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-for-confirmation: false
+          tag: ${{ github.ref_name }}
