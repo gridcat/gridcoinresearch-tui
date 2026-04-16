@@ -2,10 +2,6 @@ version: 2
 
 project_name: gridcoinresearch-tui
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: gridcoinresearch-tui
     main: .

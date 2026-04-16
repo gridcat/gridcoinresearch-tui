@@ -201,11 +201,18 @@ func (m Model) renderStats() string {
 		return styleBorder.Width(m.width - 2).Render(styleMuted.Render("loading wallet…"))
 	}
 
-	balanceRow := statRow("Balance", styleValue.Render(FormatGRCPlain(m.wallet.Balance)),
+	fmtBal := func(v float64) string {
+		if m.anonymous {
+			return styleValue.Render(MaskedAmount)
+		}
+		return styleValue.Render(FormatGRCPlain(v))
+	}
+
+	balanceRow := statRow("Balance", fmtBal(m.wallet.Balance),
 		"Staking", m.stakingBadge())
-	unconfRow := statRow("Unconfirmed", styleValue.Render(FormatGRCPlain(m.wallet.UnconfirmedBalance)),
+	unconfRow := statRow("Unconfirmed", fmtBal(m.wallet.UnconfirmedBalance),
 		"Wallet", m.lockBadge())
-	immatureRow := statRow("Immature", styleValue.Render(FormatGRCPlain(m.wallet.ImmatureBalance)),
+	immatureRow := statRow("Immature", fmtBal(m.wallet.ImmatureBalance),
 		"Difficulty", styleValue.Render(fmt.Sprintf("%.4f", m.staking.Difficulty.Value())))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, balanceRow, unconfRow, immatureRow)
@@ -300,7 +307,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 	}
 	for i := offset; i < end; i++ {
 		prefix := "  "
-		row := renderAddressRow(m.addresses[i])
+		row := renderAddressRow(m.addresses[i], m.anonymous)
 		if i == m.addrCursor && m.focusedArea == focusAddr {
 			prefix = styleAccent.Render("▸ ")
 			row = styleRowSelected.Render(row)
@@ -310,7 +317,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 	return box.Render(strings.Join(lines, "\n"))
 }
 
-func renderAddressRow(a ReceivedAddress) string {
+func renderAddressRow(a ReceivedAddress, anonymous bool) string {
 	addr := styleValue.Render(a.Address)
 	label := ""
 	if l := a.DisplayLabel(); l != "" {
@@ -318,7 +325,11 @@ func renderAddressRow(a ReceivedAddress) string {
 	}
 	amount := ""
 	if a.Amount > 0 {
-		amount = "  " + styleGood.Render("received "+FormatGRCPlain(a.Amount))
+		if anonymous {
+			amount = "  " + styleGood.Render("received " + MaskedAmount)
+		} else {
+			amount = "  " + styleGood.Render("received "+FormatGRCPlain(a.Amount))
+		}
 	}
 	return "  " + addr + label + amount
 }
@@ -369,7 +380,7 @@ func (m Model) renderTxList(height int) string {
 	lines := []string{title}
 	for i := offset; i < offset+maxRows && i < len(m.txs); i++ {
 		prefix := "  "
-		line := renderTxRow(m.txs[i])
+		line := renderTxRow(m.txs[i], m.anonymous)
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
 			// tx list leaves the cursor as a silent bookmark — symmetric
@@ -382,7 +393,7 @@ func (m Model) renderTxList(height int) string {
 	return boxStyle.Render(strings.Join(lines, "\n"))
 }
 
-func renderTxRow(tx Transaction) string {
+func renderTxRow(tx Transaction, anonymous bool) string {
 	st := ClassifyTransaction(tx)
 	iconStyle, ok := txKindStyle[st.Kind]
 	if !ok {
@@ -391,14 +402,19 @@ func renderTxRow(tx Transaction) string {
 	icon := iconStyle.Render(st.Icon)
 	status := styleTxStatusCol.Render(st.Label)
 
-	amountStyle := styleValue
-	switch {
-	case tx.Amount < 0:
-		amountStyle = styleWarn
-	case tx.Amount > 0:
-		amountStyle = styleGood
+	var amountCol string
+	if anonymous {
+		amountCol = styleTxAmountCol.Render(styleMuted.Render(MaskedAmount))
+	} else {
+		amountStyle := styleValue
+		switch {
+		case tx.Amount < 0:
+			amountStyle = styleWarn
+		case tx.Amount > 0:
+			amountStyle = styleGood
+		}
+		amountCol = styleTxAmountCol.Render(amountStyle.Render(FormatGRC(tx.Amount)))
 	}
-	amountCol := styleTxAmountCol.Render(amountStyle.Render(FormatGRC(tx.Amount)))
 
 	addr := tx.Address
 	if addr == "" && (tx.Category == "generate" || tx.Category == "immature") {
@@ -415,10 +431,15 @@ func renderTxRow(tx Transaction) string {
 }
 
 func (m Model) renderFooter() string {
+	anonLabel := "[a]non"
+	if m.anonymous {
+		anonLabel = "[a]non ●"
+	}
 	keys := []string{
 		"[s]end",
 		"[c]onfig",
 		"[r]efresh",
+		anonLabel,
 		"[tab] switch panel",
 		"[↑/↓ · pgup/pgdn] scroll",
 		"[q]uit",
@@ -454,7 +475,11 @@ func (m Model) renderSendModal() string {
 		}
 	case sendStepAmount:
 		body = "Amount (GRC):\n\n" + m.send.amount.View()
-		body += "\n\n" + styleMuted.Render("available: "+FormatGRCPlain(m.wallet.Balance))
+		avail := FormatGRCPlain(m.wallet.Balance)
+		if m.anonymous {
+			avail = MaskedAmount
+		}
+		body += "\n\n" + styleMuted.Render("available: "+avail)
 		if m.send.errMsg != "" {
 			body += "\n\n" + styleBad.Render(m.send.errMsg)
 		} else {
@@ -468,9 +493,13 @@ func (m Model) renderSendModal() string {
 			body += "\n\n" + styleMuted.Render("enter to continue · esc to cancel")
 		}
 	case sendStepConfirm:
+		confirmAmount := FormatGRCFullPlain(m.send.amountValue)
+		if m.anonymous {
+			confirmAmount = MaskedAmount
+		}
 		body = styleTitle.Render("Confirm send") + "\n\n"
 		body += fmt.Sprintf("  To:     %s\n", m.send.address.Value())
-		body += fmt.Sprintf("  Amount: %s\n", FormatGRCFullPlain(m.send.amountValue))
+		body += fmt.Sprintf("  Amount: %s\n", confirmAmount)
 		body += "\n" + styleMuted.Render("[y] broadcast   [n] cancel")
 	case sendStepResult:
 		if m.send.resultErr != "" {
@@ -535,15 +564,22 @@ func (m Model) renderTxDetailModal() string {
 		confLine += "  (in mempool)"
 	}
 
+	amountStr := FormatGRCFull(tx.Amount)
+	feeStr := FormatGRCFull(tx.Fee)
+	if m.anonymous {
+		amountStr = MaskedAmount
+		feeStr = MaskedAmount
+	}
+
 	lines := []string{
 		styleTitle.Render("Transaction"),
 		"",
 		statusLine,
 		field("Category", tx.Category),
-		field("Amount", FormatGRCFull(tx.Amount)),
+		field("Amount", amountStr),
 	}
 	if tx.Fee != 0 {
-		lines = append(lines, field("Fee", FormatGRCFull(tx.Fee)))
+		lines = append(lines, field("Fee", feeStr))
 	}
 	lines = append(lines,
 		field("Address", addr),

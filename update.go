@@ -423,6 +423,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		m.openConfigModal()
 		return m, nil
+	case "a":
+		m.anonymous = !m.anonymous
+		return m, nil
 	case "tab":
 		// Toggle the arrow-key focus between the tx list and the addresses panel.
 		if m.focusedArea == focusTx {
@@ -563,7 +566,11 @@ func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if amt > m.wallet.Balance {
-				m.send.errMsg = fmt.Sprintf("amount exceeds balance (%s available)", FormatGRCPlain(m.wallet.Balance))
+				avail := FormatGRCPlain(m.wallet.Balance)
+				if m.anonymous {
+					avail = MaskedAmount
+				}
+				m.send.errMsg = fmt.Sprintf("amount exceeds balance (%s available)", avail)
 				return m, nil
 			}
 			m.send.errMsg = ""

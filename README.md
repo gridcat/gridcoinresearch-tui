@@ -1,5 +1,7 @@
 # gridcoinresearch-tui
 
+~[example](tui.gif)
+
 A tiny, full-screen terminal dashboard for a running [Gridcoin Research](https://gridcoin.us) wallet daemon (`gridcoinresearchd`). One static binary, zero runtime dependencies.
 
 Shows:

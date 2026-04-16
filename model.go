@@ -197,6 +197,10 @@ type Model struct {
 	txCursor   int
 	addrCursor int
 
+	// anonymous hides monetary amounts on screen. Toggled at runtime via
+	// the "a" hotkey so the user can safely show the dashboard in public.
+	anonymous bool
+
 	// Modal sub-states. Only one modal is active at a time, but keeping
 	// both fields means we preserve state if the user hits esc and comes
 	// back.

@@ -16,6 +16,10 @@ import (
 // views use 2 decimals to stay compact.
 const grcDetailDecimals = 8
 
+// MaskedAmount is the placeholder shown instead of real amounts when
+// anonymous mode is active.
+const MaskedAmount = "••••••  GRC"
+
 // FormatGRC renders an amount for table/glance display: 2 decimals, always
 // with a sign prefix ("+12.34 GRC", "−100.00 GRC", "0.00 GRC"). Uses a
 // Unicode minus sign so negative amounts visually line up with the plus.
