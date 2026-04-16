@@ -1,6 +1,6 @@
 # gridcoinresearch-tui
 
-~[example](tui.gif)
+[example](https://salmon-ruling-marlin-296.mypinata.cloud/ipfs/bafybeiedy7pnhkxqoankdveazxyfsf6omdpvglzllj5svfpmtsj3sf6ply)
 
 A tiny, full-screen terminal dashboard for a running [Gridcoin Research](https://gridcoin.us) wallet daemon (`gridcoinresearchd`). One static binary, zero runtime dependencies.
 
