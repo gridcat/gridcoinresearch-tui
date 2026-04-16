@@ -2,15 +2,17 @@ name: release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
-  goreleaser:
+  release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semrel.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,7 +28,19 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Semantic Release
+        id: semrel
+        uses: go-semantic-release/action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          allow-initial-development-versions: true
+
+      - name: Fetch tag
+        if: steps.semrel.outputs.version != ''
+        run: git fetch --tags --force
+
       - name: Run GoReleaser
+        if: steps.semrel.outputs.version != ''
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -34,9 +48,11 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: v${{ steps.semrel.outputs.version }}
 
   stamp:
-    needs: goreleaser
+    needs: release
+    if: needs.release.outputs.version != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -44,4 +60,5 @@ jobs:
       - name: Stamp release artifacts on Gridcoin
         uses: gridcat/gridcoin-stamp-action@v1
         with:
-          tag: ${{ github.ref_name }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-for-confirmation: false

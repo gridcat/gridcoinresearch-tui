@@ -56,3 +56,4 @@ changelog:
 release:
   draft: false
   prerelease: auto
+  mode: append
