@@ -65,4 +65,5 @@ jobs:
         uses: gridcat/gridcoin-stamp-action@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          tag: v${{ needs.release.outputs.version }}
           wait-for-confirmation: false
