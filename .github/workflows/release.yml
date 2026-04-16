@@ -39,6 +39,10 @@ jobs:
         if: steps.semrel.outputs.version != ''
         run: git fetch --tags --force
 
+      - name: Clean up semantic-release artifacts
+        if: steps.semrel.outputs.version != ''
+        run: rm -rf .generated-go-semantic-release-changelog.md .semrel/
+
       - name: Run GoReleaser
         if: steps.semrel.outputs.version != ''
         uses: goreleaser/goreleaser-action@v6

@@ -7,3 +7,5 @@ gridcoinresearch-tui
 !gridcoinresearch-tui/
 .idea/
 .vscode/
+.semrel/
+.generated-go-semantic-release-changelog.md
