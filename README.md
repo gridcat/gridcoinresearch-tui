@@ -119,3 +119,7 @@ Edits in the config panel are **session-only** — they apply immediately (the R
 ## License
 
 MIT
+
+---
+
+<p align="center">Made with ❤️ by @gridcat</p>
