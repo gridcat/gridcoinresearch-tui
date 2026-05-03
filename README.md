@@ -14,6 +14,7 @@ Shows:
 - **Recent transactions** with human-readable status (`upcoming` / `incoming` / `sending` / `confirmed` / `stake`)
 - **Transaction details** (full txid, address, fee, block hash, timestamps) — press `enter` on a selected row
 - **Send GRC** to any address, with pre-flight address validation and on-demand wallet unlock
+- **Sign messages** with any address you own (proves control of the address)
 - **Live config panel** — edit network / host / port / credentials / refresh interval at runtime without restarting
 
 Supports both **mainnet** and **testnet** via a CLI flag.
@@ -90,6 +91,7 @@ Resolution order, highest wins: **flag → env var → conf file → built-in de
 | `enter` | Open details for the selected transaction |
 | `g` / `G` / `home` / `end` | Jump to first / last transaction |
 | `s` | Open the send dialog |
+| `m` | Open the sign-message dialog (pre-fills the address when the addresses panel is focused) |
 | `c` | Open the live config panel |
 | `r` | Force a refresh now |
 | `tab` / `shift+tab` | Navigate fields inside a modal |
@@ -101,6 +103,14 @@ Inside the send and config modals the focused field is marked with `▸ ` so you
 ## Addresses
 
 The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Addresses are printed at full length so you can select them with your terminal's native mouse selection and copy them with your usual terminal shortcut. On small terminals the panel is capped so it cannot push the transactions list off screen — a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
+
+## Sign messages
+
+Press `m` to sign a message with one of your wallet's addresses. The resulting base64 signature can be verified by anyone via `gridcoin-cli verifymessage <address> <signature> <message>`, proving you hold the private key for that address.
+
+If the addresses panel is focused (`tab` to switch), the highlighted address is pre-filled. The chosen address stays visible at the top of the modal on every step, so you always know which key the signature is being produced with.
+
+The wallet is only unlocked when it has to be — an unencrypted wallet, or one you have already unlocked yourself (e.g. for staking), skips the passphrase prompt entirely. When the TUI did do the unlock, it re-locks immediately after the signature is produced.
 
 ## Config panel
 
@@ -119,7 +129,3 @@ Edits in the config panel are **session-only** — they apply immediately (the R
 ## License
 
 MIT
-
----
-
-<p align="center">Made with ❤️ by @gridcat</p>

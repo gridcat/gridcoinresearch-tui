@@ -113,6 +113,8 @@ func (m Model) View() string {
 	switch m.mode {
 	case modeSend:
 		return m.renderSendModal()
+	case modeSign:
+		return m.renderSignModal()
 	case modeConfig:
 		return m.renderConfigModal()
 	case modeTxDetail:
@@ -252,7 +254,7 @@ func (m Model) lockBadge() string {
 	if m.wallet.UnlockedUntil == nil {
 		return styleMuted.Render("● unencrypted")
 	}
-	if *m.wallet.UnlockedUntil == 0 {
+	if m.wallet.IsLocked() {
 		return styleWarn.Render("● locked")
 	}
 	remaining := time.Until(time.Unix(*m.wallet.UnlockedUntil, 0))
@@ -319,6 +321,15 @@ func (m Model) renderAddresses(maxHeight int) string {
 
 func renderAddressRow(a ReceivedAddress, anonymous bool) string {
 	addr := styleValue.Render(a.Address)
+	watch := ""
+	if a.InvolvesWatchonly {
+		// The eye glyph hints at the meaning visually; the trailing word
+		// makes it explicit on terminals that fall back to a tofu box.
+		// styleWarn (orange) is the same shade used for "wallet locked"
+		// in the stats panel — both convey "this needs attention before
+		// you try to sign or spend".
+		watch = "  " + styleWarn.Render("👁 watch-only")
+	}
 	label := ""
 	if l := a.DisplayLabel(); l != "" {
 		label = "  " + styleMuted.Render(l)
@@ -331,7 +342,7 @@ func renderAddressRow(a ReceivedAddress, anonymous bool) string {
 			amount = "  " + styleGood.Render("received "+FormatGRCPlain(a.Amount))
 		}
 	}
-	return "  " + addr + label + amount
+	return "  " + addr + watch + label + amount
 }
 
 
@@ -437,6 +448,7 @@ func (m Model) renderFooter() string {
 	}
 	keys := []string{
 		"[s]end",
+		"sign [m]sg",
 		"[c]onfig",
 		"[r]efresh",
 		anonLabel,
@@ -516,6 +528,74 @@ func (m Model) renderSendModal() string {
 		Padding(1, 2).
 		Width(60).
 		Render(styleTitle.Render("Send GRC") + "\n\n" + body)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+// renderSignModal walks the sign-message wizard. Layout invariant: from
+// the message step onwards, the chosen signing address is rendered as a
+// persistent "Signing as: …" header at the top of the modal so the user
+// can never sign — or read a signature — without seeing which key was
+// used. The address-input step suppresses the header because the input
+// field itself is the source of truth there.
+func (m Model) renderSignModal() string {
+	var body string
+	switch m.sign.step {
+	case signStepAddress:
+		body = "Address to sign with:\n\n" + m.sign.address.View()
+		if m.sign.errMsg != "" {
+			body += "\n\n" + styleBad.Render(m.sign.errMsg)
+		} else {
+			body += "\n\n" + styleMuted.Render("enter to continue · esc to cancel")
+		}
+	case signStepMessage:
+		body = "Message:\n\n" + m.sign.message.View()
+		if m.sign.errMsg != "" {
+			body += "\n\n" + styleBad.Render(m.sign.errMsg)
+		} else {
+			body += "\n\n" + styleMuted.Render("enter to sign · backspace to go back · esc to cancel")
+		}
+	case signStepPassphrase:
+		body = "Wallet is locked. Passphrase:\n\n" + m.sign.passphrase.View()
+		if m.sign.errMsg != "" {
+			body += "\n\n" + styleBad.Render(m.sign.errMsg)
+		} else {
+			body += "\n\n" + styleMuted.Render("enter to sign · esc to cancel")
+		}
+	case signStepResult:
+		if m.sign.resultErr != "" {
+			body = styleBad.Render("sign failed") + "\n\n" + m.sign.resultErr
+		} else {
+			body = styleGood.Render("signed ✓") + "\n\n" +
+				styleLabel.Render("Message:") + "\n" + m.sign.message.Value() + "\n\n" +
+				styleLabel.Render("Signature (base64):") + "\n" + m.sign.resultSig
+		}
+		body += "\n\n" + styleMuted.Render("press any key to close")
+	}
+	if m.sign.busy {
+		body += "\n\n" + styleMuted.Render("signing…")
+	}
+
+	header := styleTitle.Render("Sign message")
+	// From the message step onwards, surface the signing address so it is
+	// always visible. Skipping it on signStepAddress avoids a redundant
+	// echo of the input field one line below.
+	if m.sign.step != signStepAddress {
+		addr := m.sign.address.Value()
+		if addr == "" {
+			addr = styleMuted.Render("(no address set)")
+		} else {
+			addr = styleAccent.Render(addr)
+		}
+		header += "\n" + styleLabel.Render("Signing as: ") + addr
+	}
+
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(72).
+		Render(header + "\n\n" + body)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }

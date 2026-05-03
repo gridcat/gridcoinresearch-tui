@@ -27,6 +27,7 @@ type viewMode int
 const (
 	modeDashboard viewMode = iota // the default full-screen dashboard
 	modeSend                      // the "send GRC" wizard modal
+	modeSign                      // the "sign message" wizard modal
 	modeConfig                    // the runtime config editor modal
 	modeTxDetail                  // a modal showing one transaction in detail
 )
@@ -110,6 +111,38 @@ type sendState struct {
 func (s *sendState) blurAll() {
 	s.address.Blur()
 	s.amount.Blur()
+	s.passphrase.Blur()
+}
+
+// signStep is the state-machine step inside the sign-message modal. The
+// passphrase step is skipped entirely when the wallet is unencrypted or
+// already unlocked — see openSignModal / runSign.
+type signStep int
+
+const (
+	signStepAddress    signStep = iota // type / pre-fill the signing address
+	signStepMessage                    // type the message to sign
+	signStepPassphrase                 // only used when the wallet is encrypted + locked
+	signStepResult                     // show signature or error
+)
+
+// signState is the live state of the sign-message modal. resultSig holds the
+// base64 signature returned by signmessage on success.
+type signState struct {
+	step        signStep
+	address     textinput.Model
+	message     textinput.Model
+	passphrase  textinput.Model
+	needsUnlock bool   // true if the daemon says the wallet is currently locked
+	busy        bool   // true while the signmessage RPC is running
+	errMsg      string // per-step validation error
+	resultSig   string // populated in signStepResult on success
+	resultErr   string // populated in signStepResult on failure
+}
+
+func (s *signState) blurAll() {
+	s.address.Blur()
+	s.message.Blur()
 	s.passphrase.Blur()
 }
 
@@ -205,6 +238,7 @@ type Model struct {
 	// both fields means we preserve state if the user hits esc and comes
 	// back.
 	send sendState
+	sign signState
 	conf configState
 }
 
@@ -222,14 +256,15 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 	amt.CharLimit = 20
 	amt.Width = 20
 
-	pass := textinput.New()
-	pass.Placeholder = "wallet passphrase"
-	// EchoMode = EchoPassword makes the textinput render each character as
-	// the echo character below instead of the real keystroke.
-	pass.EchoMode = textinput.EchoPassword
-	pass.EchoCharacter = '•'
-	pass.CharLimit = 128
-	pass.Width = 40
+	signAddr := textinput.New()
+	signAddr.Placeholder = "S-address (one of your wallet's addresses)"
+	signAddr.CharLimit = 64
+	signAddr.Width = 50
+
+	signMsg := textinput.New()
+	signMsg.Placeholder = "message to sign"
+	signMsg.CharLimit = 1024
+	signMsg.Width = 50
 
 	return Model{
 		cfg: cfg,
@@ -239,9 +274,24 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		// here means the spinner's first tick sees a positive counter
 		// and doesn't immediately stop itself.
 		inflight: 5,
-		send:     sendState{address: addr, amount: amt, passphrase: pass},
+		send:     sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
+		sign:     signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
 		conf:     newConfigState(cfg),
 	}
+}
+
+// newPassphraseInput builds a fresh masked textinput for any wallet
+// passphrase prompt. EchoMode = EchoPassword makes the textinput render
+// each character as the echo character instead of the real keystroke, so
+// the passphrase never lands on screen.
+func newPassphraseInput() textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = "wallet passphrase"
+	ti.EchoMode = textinput.EchoPassword
+	ti.EchoCharacter = '•'
+	ti.CharLimit = 128
+	ti.Width = 40
+	return ti
 }
 
 // newConfigState builds a fresh configState pre-populated with the values

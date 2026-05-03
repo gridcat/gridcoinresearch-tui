@@ -75,6 +75,10 @@ type sendResultMsg struct {
 	txid string
 	err  error
 }
+type signResultMsg struct {
+	sig string
+	err error
+}
 
 // spinnerTickMsg fires on a fast timer (every spinnerInterval) while the
 // refresh spinner is running. It is separate from tickMsg because the
@@ -232,6 +236,27 @@ func runSend(rpc *RPCClient, addr string, amount float64, passphrase string, nee
 	}
 }
 
+// runSign mirrors runSend's lifecycle for the signmessage RPC. needsUnlock
+// is the conjunction of "wallet is encrypted" AND "wallet is currently
+// locked" — an unencrypted wallet, or one the user has already unlocked
+// for staking, never gets the walletpassphrase / walletlock pair sent at
+// it. We only re-lock when WE were the ones who unlocked, so we don't
+// trample on the user's existing unlock window.
+func runSign(rpc *RPCClient, addr, message, passphrase string, needsUnlock bool) tea.Cmd {
+	return func() tea.Msg {
+		if needsUnlock {
+			if err := rpc.WalletPassphrase(passphrase, 30); err != nil {
+				return signResultMsg{err: fmt.Errorf("unlock: %w", err)}
+			}
+		}
+		sig, err := rpc.SignMessage(addr, message)
+		if needsUnlock {
+			_ = rpc.WalletLock()
+		}
+		return signResultMsg{sig: sig, err: err}
+	}
+}
+
 // ---- Init / Update ----------------------------------------------------
 
 // Init is called once when the program starts. Whatever Cmd it returns is
@@ -379,6 +404,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		spin := m.bumpInflight(1)
 		return m, tea.Batch(fetchTxs(m.rpc, m.txsLastBlock), spin)
 
+	case signResultMsg:
+		m.sign.busy = false
+		m.sign.step = signStepResult
+		if msg.err != nil {
+			m.sign.resultErr = msg.err.Error()
+		} else {
+			m.sign.resultSig = msg.sig
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -394,6 +429,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeSend:
 		return m.handleSendKey(msg)
+	case modeSign:
+		return m.handleSignKey(msg)
 	case modeConfig:
 		return m.handleConfigKey(msg)
 	case modeTxDetail:
@@ -419,6 +456,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.refreshAllCmd(), spin)
 	case "s":
 		m.openSendModal()
+		return m, nil
+	case "m":
+		m.openSignModal()
 		return m, nil
 	case "c":
 		m.openConfigModal()
@@ -522,7 +562,7 @@ func (m *Model) openSendModal() {
 		address:     m.send.address,
 		amount:      m.send.amount,
 		passphrase:  m.send.passphrase,
-		needsUnlock: m.wallet.UnlockedUntil != nil && *m.wallet.UnlockedUntil == 0,
+		needsUnlock: m.wallet.IsLocked(),
 	}
 	m.send.address.SetValue("")
 	m.send.amount.SetValue("")
@@ -622,6 +662,125 @@ func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case sendStepResult:
 		// Any key dismisses the result screen.
 		m.mode = modeDashboard
+		return m, nil
+	}
+	return m, nil
+}
+
+// ---- Sign-message modal -----------------------------------------------
+
+// openSignModal resets the sign wizard, pre-filling the address from the
+// currently selected entry in the My Addresses panel when that panel has
+// focus. Pre-filling makes the common case (sign with one of my own
+// addresses) zero-friction; falling back to an empty field keeps the
+// modal usable when triggered from the tx panel or before addresses
+// have loaded.
+//
+// needsUnlock follows the same UnlockedUntil tri-state contract used by
+// the send wizard: nil = unencrypted, *v == 0 = encrypted+locked,
+// *v > 0 = encrypted+already unlocked. We only ever prompt for a
+// passphrase in the second case.
+func (m *Model) openSignModal() {
+	m.mode = modeSign
+	m.sign = signState{
+		step:        signStepAddress,
+		address:     m.sign.address,
+		message:     m.sign.message,
+		passphrase:  m.sign.passphrase,
+		needsUnlock: m.wallet.IsLocked(),
+	}
+	m.sign.address.SetValue("")
+	m.sign.message.SetValue("")
+	m.sign.passphrase.SetValue("")
+
+	// Pre-fill from the highlighted address when the addresses panel is
+	// focused and non-empty. Skip straight to the message step in that
+	// case so the user doesn't have to press enter on a field that is
+	// already correct.
+	if m.focusedArea == focusAddr && m.addrCursor >= 0 && m.addrCursor < len(m.addresses) {
+		m.sign.address.SetValue(m.addresses[m.addrCursor].Address)
+		m.sign.step = signStepMessage
+		m.sign.message.Focus()
+		return
+	}
+	m.sign.address.Focus()
+}
+
+// handleSignKey is the sign-wizard's input handler. State machine: the
+// current m.sign.step decides which keys do what. Mirrors handleSendKey,
+// minus the amount/balance check and the confirm step (signing has no
+// fund risk and nothing to broadcast).
+func (m Model) handleSignKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	if key == "esc" || key == "ctrl+c" {
+		m.mode = modeDashboard
+		m.sign.blurAll()
+		return m, nil
+	}
+	if m.sign.busy {
+		return m, nil // ignore input while signmessage RPC is in flight
+	}
+	switch m.sign.step {
+	case signStepAddress:
+		if key == "enter" {
+			if v := strings.TrimSpace(m.sign.address.Value()); v != "" {
+				m.sign.errMsg = ""
+				m.sign.address.Blur()
+				m.sign.step = signStepMessage
+				m.sign.message.Focus()
+				return m, nil
+			}
+			m.sign.errMsg = "address required"
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.sign.address, cmd = m.sign.address.Update(msg)
+		return m, cmd
+	case signStepMessage:
+		if key == "enter" {
+			if m.sign.message.Value() == "" {
+				m.sign.errMsg = "message cannot be empty"
+				return m, nil
+			}
+			m.sign.errMsg = ""
+			m.sign.message.Blur()
+			if m.sign.needsUnlock {
+				m.sign.step = signStepPassphrase
+				m.sign.passphrase.Focus()
+				return m, nil
+			}
+			// Wallet is unencrypted or already unlocked — no passphrase needed.
+			m.sign.busy = true
+			return m, runSign(m.rpc, m.sign.address.Value(),
+				m.sign.message.Value(), "", false)
+		}
+		if key == "backspace" && m.sign.message.Value() == "" {
+			m.sign.step = signStepAddress
+			m.sign.message.Blur()
+			m.sign.address.Focus()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.sign.message, cmd = m.sign.message.Update(msg)
+		return m, cmd
+	case signStepPassphrase:
+		if key == "enter" {
+			if m.sign.passphrase.Value() == "" {
+				m.sign.errMsg = "passphrase required"
+				return m, nil
+			}
+			m.sign.errMsg = ""
+			m.sign.busy = true
+			return m, runSign(m.rpc, m.sign.address.Value(),
+				m.sign.message.Value(), m.sign.passphrase.Value(), true)
+		}
+		var cmd tea.Cmd
+		m.sign.passphrase, cmd = m.sign.passphrase.Update(msg)
+		return m, cmd
+	case signStepResult:
+		// Any key dismisses the result screen.
+		m.mode = modeDashboard
+		m.sign.blurAll()
 		return m, nil
 	}
 	return m, nil

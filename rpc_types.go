@@ -29,6 +29,16 @@ type WalletInfo struct {
 	UnlockedUntil *int64 `json:"unlocked_until"`
 }
 
+// IsLocked reports whether the wallet currently needs a passphrase before
+// it will sign or send. True only when the wallet is encrypted AND not
+// currently unlocked — an unencrypted wallet (UnlockedUntil == nil) and
+// one the user has already unlocked themselves (e.g. for staking) both
+// return false, so callers don't ask for a passphrase the daemon doesn't
+// need.
+func (w WalletInfo) IsLocked() bool {
+	return w.UnlockedUntil != nil && *w.UnlockedUntil == 0
+}
+
 // BlockchainInfo matches getblockchaininfo. We only use Chain and Blocks in
 // the UI today; the rest is kept for future use.
 type BlockchainInfo struct {
@@ -146,12 +156,19 @@ type ValidateAddress struct {
 // ReceivedAddress is one entry from listreceivedbyaddress. Gridcoin still
 // emits the legacy `account` field instead of the newer `label` field, so
 // we decode both and fall back in DisplayLabel.
+//
+// InvolvesWatchonly is true for addresses imported via importaddress
+// without the private key — the daemon tracks balances on them but
+// cannot sign on their behalf. The field is only present in the JSON
+// when true (bitcoin-core convention), so a missing field correctly
+// decodes to the default `false` and means "wallet owns the key".
 type ReceivedAddress struct {
-	Address       string  `json:"address"`
-	Amount        float64 `json:"amount"`
-	Confirmations int64   `json:"confirmations"`
-	Label         string  `json:"label"`   // newer bitcoin-core style
-	Account       string  `json:"account"` // legacy field still emitted by gridcoinresearchd
+	Address           string  `json:"address"`
+	Amount            float64 `json:"amount"`
+	Confirmations     int64   `json:"confirmations"`
+	Label             string  `json:"label"`             // newer bitcoin-core style
+	Account           string  `json:"account"`           // legacy field still emitted by gridcoinresearchd
+	InvolvesWatchonly bool    `json:"involvesWatchonly"` // true when the wallet only watches this address (no private key)
 }
 
 // DisplayLabel returns the label to show next to the address in the UI,

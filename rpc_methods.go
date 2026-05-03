@@ -85,6 +85,15 @@ func (c *RPCClient) SendToAddress(addr string, amount float64) (string, error) {
 	return txid, err
 }
 
+// SignMessage produces a base64 ECDSA signature of `message` using the private
+// key of `addr`. The address must be one the wallet holds the private key for,
+// and an encrypted wallet must be unlocked first via WalletPassphrase.
+func (c *RPCClient) SignMessage(addr, message string) (string, error) {
+	var sig string
+	err := c.Call("signmessage", []any{addr, message}, &sig)
+	return sig, err
+}
+
 // ListReceivedByAddress returns every address the wallet knows about.
 // Parameters: minconf=0 (include 0-conf receives), include_empty=true
 // (show addresses with no received amount too), include_watchonly=true
