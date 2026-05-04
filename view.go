@@ -590,11 +590,29 @@ func (m Model) renderSignModal() string {
 		header += "\n" + styleLabel.Render("Signing as: ") + addr
 	}
 
+	// Default width is comfortable for the input steps. On the result
+	// step we expand to whatever the signature needs so it fits on a
+	// single uninterrupted line — otherwise lipgloss wraps it inside the
+	// modal and a mouse selection drags the right-side border in with
+	// the copied text. 6 = 2 border + 4 padding(1,2). Cap to the
+	// terminal width so we still render cleanly on narrow terminals
+	// (signature will wrap there as a last resort, but most terminals
+	// are wide enough).
+	modalWidth := 72
+	if m.sign.step == signStepResult && m.sign.resultSig != "" {
+		if needed := len(m.sign.resultSig) + 6; needed > modalWidth {
+			modalWidth = needed
+		}
+	}
+	if max := m.width - 2; modalWidth > max && max > 0 {
+		modalWidth = max
+	}
+
 	modal := lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
 		BorderForeground(colorAccent).
 		Padding(1, 2).
-		Width(72).
+		Width(modalWidth).
 		Render(header + "\n\n" + body)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
