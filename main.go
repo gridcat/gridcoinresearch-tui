@@ -16,6 +16,11 @@ import (
 	// (tea.Program, tea.Cmd, tea.Quit, …) without shadowing a real package
 	// called "bubbletea" anywhere else in the tree.
 	tea "github.com/charmbracelet/bubbletea"
+
+	// term gives us IsTerminal + ReadPassword for the masked startup
+	// prompt when a user is configured without a password. Already pulled
+	// in transitively by Bubble Tea, so no extra module cost.
+	"github.com/charmbracelet/x/term"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=…".
@@ -36,6 +41,25 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(2)
+	}
+
+	// If a username resolved but no password did, prompt for it before the
+	// TUI takes over. Skipped when stdin isn't a TTY so headless runs (CI,
+	// docker exec without -t, piped stdin) fail fast with a clear message
+	// instead of blocking forever on Read.
+	if cfg.User != "" && cfg.Password == "" {
+		if !term.IsTerminal(os.Stdin.Fd()) {
+			fmt.Fprintln(os.Stderr, "config: --rpc-user is set but no password was found in --rpc-password, GRC_RPC_PASSWORD or the conf file, and stdin is not a terminal — refusing to prompt")
+			os.Exit(2)
+		}
+		fmt.Fprintf(os.Stderr, "RPC password for %s: ", cfg.User)
+		pw, err := term.ReadPassword(os.Stdin.Fd())
+		fmt.Fprintln(os.Stderr) // ReadPassword consumes the trailing newline; print our own
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "config: failed to read password:", err)
+			os.Exit(2)
+		}
+		cfg.Password = string(pw)
 	}
 
 	rpc := NewRPCClient(cfg)
