@@ -120,6 +120,8 @@ func (m Model) View() string {
 		return m.renderConfigModal()
 	case modeTxDetail:
 		return m.renderTxDetailModal()
+	case modeEditLabel:
+		return m.renderEditLabelModal()
 	}
 	return m.renderDashboard()
 }
@@ -638,16 +640,20 @@ func (m Model) renderFooter() string {
 	if m.anonymous {
 		anonLabel = "[a]non ●"
 	}
-	keys := []string{
-		"[s]end",
-		"sign [m]sg",
+	keys := []string{"[s]end", "sign [m]sg"}
+	// [e]dit label only acts on the focused addresses panel, so surface it
+	// contextually rather than implying it works everywhere.
+	if m.focusedArea == focusAddr {
+		keys = append(keys, "[e]dit label")
+	}
+	keys = append(keys,
 		"[c]onfig",
 		"[r]efresh",
 		anonLabel,
 		"[tab] switch panel",
 		"[↑/↓ · pgup/pgdn] scroll",
 		"[q]uit",
-	}
+	)
 	left := styleMuted.Render(strings.Join(keys, "  "))
 	right := ""
 	// While any RPC fetch is in flight we show a spinning Braille dot
@@ -796,6 +802,38 @@ func (m Model) renderSignModal() string {
 			modalWidth = needed
 		}
 	}
+	if max := m.width - 2; modalWidth > max && max > 0 {
+		modalWidth = max
+	}
+
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(modalWidth).
+		Render(header + "\n\n" + body)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+// renderEditLabelModal shows the address whose label is being edited (read
+// only) plus the editable label input. Mirrors renderSignModal's double
+// border centered layout, minus the multi-step machinery.
+func (m Model) renderEditLabelModal() string {
+	header := styleTitle.Render("Edit label") + "\n" +
+		styleLabel.Render("Address: ") + styleAccent.Render(m.edit.address)
+
+	body := "Label:\n\n" + m.edit.label.View()
+	if m.edit.errMsg != "" {
+		body += "\n\n" + styleBad.Render(m.edit.errMsg)
+	} else {
+		body += "\n\n" + styleMuted.Render("enter to save · empty clears label · esc to cancel")
+	}
+	if m.edit.busy {
+		body += "\n\n" + styleMuted.Render("saving…")
+	}
+
+	modalWidth := 72
 	if max := m.width - 2; modalWidth > max && max > 0 {
 		modalWidth = max
 	}

@@ -30,6 +30,7 @@ const (
 	modeSign                      // the "sign message" wizard modal
 	modeConfig                    // the runtime config editor modal
 	modeTxDetail                  // a modal showing one transaction in detail
+	modeEditLabel                 // the "edit address label" modal
 )
 
 // focusArea identifies which scrollable list on the dashboard is "active"
@@ -146,6 +147,23 @@ func (s *signState) blurAll() {
 	s.passphrase.Blur()
 }
 
+// editLabelState is the live state of the edit-label modal. There is a single
+// text input and no multi-step wizard (setting a label needs no passphrase),
+// so it carries none of the step/needsUnlock/result machinery the send and
+// sign modals do — just the input, the target address, an in-flight flag, and
+// an error string. On success the modal closes outright, so there is no result
+// field to populate.
+type editLabelState struct {
+	label   textinput.Model // editable label text (empty = clear the label)
+	address string          // address whose label we're editing (read-only display)
+	busy    bool            // true while the setaccount RPC is in flight
+	errMsg  string          // RPC / validation error shown under the input
+}
+
+func (s *editLabelState) blurAll() {
+	s.label.Blur()
+}
+
 func (cs *configState) blurAll() {
 	cs.host.Blur()
 	cs.port.Blur()
@@ -246,6 +264,7 @@ type Model struct {
 	send sendState
 	sign signState
 	conf configState
+	edit editLabelState
 }
 
 // NewModel constructs the initial Model. This is where the one-time setup
@@ -272,6 +291,11 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 	signMsg.CharLimit = 1024
 	signMsg.Width = 50
 
+	labelInput := textinput.New()
+	labelInput.Placeholder = "label (empty to clear)"
+	labelInput.CharLimit = 128
+	labelInput.Width = 50
+
 	return Model{
 		cfg: cfg,
 		rpc: rpc,
@@ -283,6 +307,7 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		send:     sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
 		sign:     signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
 		conf:     newConfigState(cfg),
+		edit:     editLabelState{label: labelInput},
 	}
 }
 

@@ -96,6 +96,7 @@ Resolution order, highest wins: **flag → env var → conf file → built-in de
 | `g` / `G` / `home` / `end` | Jump to first / last transaction |
 | `s` | Open the send dialog |
 | `m` | Open the sign-message dialog (pre-fills the address when the addresses panel is focused) |
+| `e` | Edit the label of the selected address (only when the My Addresses panel is focused) |
 | `c` | Open the live config panel |
 | `r` | Force a refresh now |
 | `tab` / `shift+tab` | Navigate fields inside a modal |
@@ -106,7 +107,7 @@ Inside the send and config modals the focused field is marked with `▸ ` so you
 
 ## Addresses
 
-The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Each row shows the address plus its label, watch-only flag, and amount received. Rows that are too wide for the panel are clipped rather than wrapped (a muted `‹`/`›` marks hidden content); focus the panel with `tab` and use `←`/`→` to pan sideways and read the rest. At normal terminal widths the address itself always fits, so you can still mouse-select and copy it with your terminal's native shortcut. On small terminals the panel is also capped vertically so it cannot push the transactions list off screen, a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
+The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Each row shows the address plus its label, watch-only flag, and amount received. Rows that are too wide for the panel are clipped rather than wrapped (a muted `‹`/`›` marks hidden content); focus the panel with `tab` and use `←`/`→` to pan sideways and read the rest. Press `e` on the selected address to set or change its label (an empty value clears it); the change is written to the wallet via `setaccount` and shown after the next refresh. At normal terminal widths the address itself always fits, so you can still mouse-select and copy it with your terminal's native shortcut. On small terminals the panel is also capped vertically so it cannot push the transactions list off screen, a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
 
 ## Sign messages
 

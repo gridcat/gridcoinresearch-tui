@@ -79,6 +79,9 @@ type signResultMsg struct {
 	sig string
 	err error
 }
+type setLabelResultMsg struct {
+	err error
+}
 
 // spinnerTickMsg fires on a fast timer (every spinnerInterval) while the
 // refresh spinner is running. It is separate from tickMsg because the
@@ -267,6 +270,15 @@ func runSign(rpc *RPCClient, addr, message, passphrase string, needsUnlock bool)
 	}
 }
 
+// runSetLabel fires the setaccount RPC and reports the outcome as a
+// setLabelResultMsg. Unlike runSign/runSend there is no passphrase / unlock
+// dance — setting a label is address-book metadata, not a signing operation.
+func runSetLabel(rpc *RPCClient, addr, label string) tea.Cmd {
+	return func() tea.Msg {
+		return setLabelResultMsg{err: rpc.SetAccount(addr, label)}
+	}
+}
+
 // ---- Init / Update ----------------------------------------------------
 
 // Init is called once when the program starts. Whatever Cmd it returns is
@@ -424,6 +436,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case setLabelResultMsg:
+		m.edit.busy = false
+		if msg.err != nil {
+			// Keep the modal open so the user can read the error and retry.
+			m.edit.errMsg = msg.err.Error()
+			return m, nil
+		}
+		// Success: close the modal and refresh the address list so the new
+		// label (Gridcoin's legacy "account") shows via DisplayLabel.
+		m.edit.blurAll()
+		m.mode = modeDashboard
+		spin := m.bumpInflight(1)
+		return m, tea.Batch(fetchAddrs(m.rpc), spin)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -449,6 +475,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeDashboard
 		}
 		return m, nil
+	case modeEditLabel:
+		return m.handleEditLabelKey(msg)
 	}
 	// Dashboard-mode keys.
 	switch msg.String() {
@@ -469,6 +497,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "m":
 		m.openSignModal()
+		return m, nil
+	case "e":
+		// Edit the label of the highlighted address — only meaningful when
+		// the addresses panel is focused and has a valid selection. The
+		// cursor>=0 && <len guard also covers the empty-list case.
+		if m.focusedArea == focusAddr && m.addrCursor >= 0 && m.addrCursor < len(m.addresses) {
+			m.openEditLabelModal()
+		}
 		return m, nil
 	case "c":
 		m.openConfigModal()
@@ -808,6 +844,52 @@ func (m Model) handleSignKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// ---- Edit-label modal -------------------------------------------------
+
+// openEditLabelModal opens the edit-label modal pre-filled with the
+// highlighted address's current label, so the user edits in place. The caller
+// (handleKey "e") has already verified the addresses panel is focused and
+// addrCursor is in range.
+func (m *Model) openEditLabelModal() {
+	sel := m.addresses[m.addrCursor]
+	m.mode = modeEditLabel
+	// Reset the struct to clear any stale busy/errMsg from a previous open,
+	// keeping the configured textinput (placeholder/width).
+	m.edit = editLabelState{
+		label:   m.edit.label,
+		address: sel.Address,
+	}
+	m.edit.label.SetValue(sel.DisplayLabel())
+	m.edit.label.CursorEnd()
+	m.edit.label.Focus()
+}
+
+// handleEditLabelKey drives the single-input edit-label modal: esc cancels,
+// enter submits the setaccount RPC (an empty value clears the label), input is
+// ignored while the RPC is in flight, and every other key edits the textinput.
+// There is no result phase — success closes the modal in the setLabelResultMsg
+// handler, and an error returns here with the modal still open.
+func (m Model) handleEditLabelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	if key == "esc" || key == "ctrl+c" {
+		m.mode = modeDashboard
+		m.edit.blurAll()
+		return m, nil
+	}
+	if m.edit.busy {
+		return m, nil // ignore input while setaccount is running
+	}
+	if key == "enter" {
+		// Empty value is allowed; it clears the label.
+		m.edit.errMsg = ""
+		m.edit.busy = true
+		return m, runSetLabel(m.rpc, m.edit.address, m.edit.label.Value())
+	}
+	var cmd tea.Cmd
+	m.edit.label, cmd = m.edit.label.Update(msg)
+	return m, cmd
 }
 
 // ---- Config modal -----------------------------------------------------

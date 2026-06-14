@@ -94,6 +94,16 @@ func (c *RPCClient) SignMessage(addr, message string) (string, error) {
 	return sig, err
 }
 
+// SetAccount sets the address-book label for addr; an empty label clears it.
+// Gridcoin still uses the legacy "account" call and emits the matching
+// `account` field, which ReceivedAddress.DisplayLabel reads — so on Gridcoin
+// "label" and "account" are the same thing. This is pure metadata: no wallet
+// unlock or signing is involved, and it works on watch-only addresses too. A
+// successful call returns JSON null, hence the nil out-pointer.
+func (c *RPCClient) SetAccount(addr, label string) error {
+	return c.Call("setaccount", []any{addr, label}, nil)
+}
+
 // ListReceivedByAddress returns every address the wallet knows about.
 // Parameters: minconf=0 (include 0-conf receives), include_empty=true
 // (show addresses with no received amount too), include_watchonly=true
