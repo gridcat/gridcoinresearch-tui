@@ -483,6 +483,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.focusedArea = focusTx
 		}
+		// Start each visit to the addresses panel from the left edge.
+		m.addrHScroll = 0
+		return m, nil
+	case "left", "h":
+		// Pan the addresses panel left. Other panels don't scroll horizontally.
+		if m.focusedArea == focusAddr && m.addrHScroll > 0 {
+			m.addrHScroll--
+		}
+		return m, nil
+	case "right", "l":
+		// Pan the addresses panel right, clamped to the widest row.
+		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.addrRowWidth()) {
+			m.addrHScroll++
+		}
 		return m, nil
 	case "enter":
 		// Enter only opens the tx detail modal — pressing it while the

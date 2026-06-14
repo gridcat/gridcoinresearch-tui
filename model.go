@@ -230,6 +230,12 @@ type Model struct {
 	txCursor   int
 	addrCursor int
 
+	// addrHScroll is the horizontal column offset for the My Addresses panel,
+	// driven by left/right when that panel is focused. Lets long rows (address
+	// + label + amount) pan sideways instead of wrapping. Reset to 0 whenever
+	// focus leaves the panel so re-entering always starts at the left edge.
+	addrHScroll int
+
 	// anonymous hides monetary amounts on screen. Toggled at runtime via
 	// the "a" hotkey so the user can safely show the dashboard in public.
 	anonymous bool

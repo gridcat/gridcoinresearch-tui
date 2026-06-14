@@ -90,7 +90,8 @@ Resolution order, highest wins: **flag → env var → conf file → built-in de
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` / `k` / `j` | Move the transaction cursor |
+| `↑` / `↓` / `k` / `j` | Move the cursor in the focused panel |
+| `←` / `→` / `h` / `l` | Pan the My Addresses panel sideways when a row is too wide to fit |
 | `enter` | Open details for the selected transaction |
 | `g` / `G` / `home` / `end` | Jump to first / last transaction |
 | `s` | Open the send dialog |
@@ -105,7 +106,7 @@ Inside the send and config modals the focused field is marked with `▸ ` so you
 
 ## Addresses
 
-The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Addresses are printed at full length so you can select them with your terminal's native mouse selection and copy them with your usual terminal shortcut. On small terminals the panel is capped so it cannot push the transactions list off screen, a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
+The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Each row shows the address plus its label, watch-only flag, and amount received. Rows that are too wide for the panel are clipped rather than wrapped (a muted `‹`/`›` marks hidden content); focus the panel with `tab` and use `←`/`→` to pan sideways and read the rest. At normal terminal widths the address itself always fits, so you can still mouse-select and copy it with your terminal's native shortcut. On small terminals the panel is also capped vertically so it cannot push the transactions list off screen, a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
 
 ## Sign messages
 

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // Colour palette. lipgloss.Color accepts any 256-colour terminal code as a
@@ -310,6 +311,36 @@ func (m Model) lockBadge() string {
 	return styleGood.Render("● unlocked " + FormatDuration(remaining))
 }
 
+// addrRowWidth is the visual column budget for one address row: the box's
+// inner text area (m.width-4 for border + padding) minus the 2-column row
+// prefix. Clamped to at least 1 so tiny terminals don't produce a negative
+// width. Shared by the renderer and the left/right key handler so their
+// scroll clamps agree.
+func (m Model) addrRowWidth() int {
+	w := m.width - 6
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// addrMaxScroll is the furthest right the address panel can pan: the widest
+// row's column count minus the visible row width (never negative). Returns 0
+// when every row already fits, which also doubles as "scrolling is pointless"
+// for the ←/→ hint.
+func (m Model) addrMaxScroll(rowWidth int) int {
+	widest := 0
+	for _, a := range m.addresses {
+		if w := segmentsWidth(addressRowSegments(a, m.anonymous)); w > widest {
+			widest = w
+		}
+	}
+	if max := widest - rowWidth; max > 0 {
+		return max
+	}
+	return 0
+}
+
 // renderAddresses draws the scrollable My Addresses panel. Like
 // renderTxList, it derives the visible window from the cursor each
 // frame. The panel renders a focus indicator (accent border + ▸ on the
@@ -344,11 +375,22 @@ func (m Model) renderAddresses(maxHeight int) string {
 		offset = m.addrCursor - maxRows + 1
 	}
 
+	rowWidth := m.addrRowWidth()
+	// Clamp the horizontal scroll so it can't pan past the longest row.
+	hoff := m.addrHScroll
+	if max := m.addrMaxScroll(rowWidth); hoff > max {
+		hoff = max
+	}
+
 	// Title carries the total count plus a "cursor/total" indicator when
-	// the list is longer than the window.
+	// the list is longer than the window, and a ←/→ hint once a row is wide
+	// enough to scroll and the panel is focused.
 	header := fmt.Sprintf("My Addresses (%d)", len(m.addresses))
 	if len(m.addresses) > maxRows {
 		header += fmt.Sprintf("  %d/%d", m.addrCursor+1, len(m.addresses))
+	}
+	if m.focusedArea == focusAddr && m.addrMaxScroll(rowWidth) > 0 {
+		header += styleMuted.Render("  ←/→")
 	}
 	lines := []string{styleTitle.Render(header)}
 
@@ -358,7 +400,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 	}
 	for i := offset; i < end; i++ {
 		prefix := "  "
-		row := renderAddressRow(m.addresses[i], m.anonymous)
+		row := clipSegments(addressRowSegments(m.addresses[i], m.anonymous), hoff, rowWidth)
 		if i == m.addrCursor && m.focusedArea == focusAddr {
 			prefix = styleAccent.Render("▸ ")
 			row = styleRowSelected.Render(row)
@@ -368,30 +410,131 @@ func (m Model) renderAddresses(maxHeight int) string {
 	return box.Render(strings.Join(lines, "\n"))
 }
 
-func renderAddressRow(a ReceivedAddress, anonymous bool) string {
-	addr := styleValue.Render(a.Address)
-	watch := ""
+// styledSeg is one coloured run of an address row. We keep rows as a list of
+// (plain text, style) pairs rather than a single pre-rendered string so the
+// horizontal-scroll window can slice them by visual column and still style
+// each visible piece — slicing an already-rendered ANSI string by column is
+// what the pinned x/ansi can't do (it only truncates from the right).
+type styledSeg struct {
+	text  string
+	style lipgloss.Style
+}
+
+// addressRowSegments builds the coloured runs for one address: the address
+// itself, then optional watch-only flag, label, and received amount, each
+// separated by a two-space gap.
+func addressRowSegments(a ReceivedAddress, anonymous bool) []styledSeg {
+	segs := []styledSeg{{a.Address, styleValue}}
+	gap := styledSeg{"  ", styleMuted}
 	if a.InvolvesWatchonly {
 		// The eye glyph hints at the meaning visually; the trailing word
 		// makes it explicit on terminals that fall back to a tofu box.
 		// styleWarn (orange) is the same shade used for "wallet locked"
 		// in the stats panel, both convey "this needs attention before
 		// you try to sign or spend".
-		watch = "  " + styleWarn.Render("👁 watch-only")
+		segs = append(segs, gap, styledSeg{"👁 watch-only", styleWarn})
 	}
-	label := ""
 	if l := a.DisplayLabel(); l != "" {
-		label = "  " + styleMuted.Render(l)
+		segs = append(segs, gap, styledSeg{l, styleMuted})
 	}
-	amount := ""
 	if a.Amount > 0 {
+		amt := "received " + FormatGRCPlain(a.Amount)
 		if anonymous {
-			amount = "  " + styleGood.Render("received " + MaskedAmount)
-		} else {
-			amount = "  " + styleGood.Render("received "+FormatGRCPlain(a.Amount))
+			amt = "received " + MaskedAmount
 		}
+		segs = append(segs, gap, styledSeg{amt, styleGood})
 	}
-	return addr + watch + label + amount
+	return segs
+}
+
+// segmentsWidth is the total visual column count of a row, used to clamp the
+// horizontal scroll so it can't pan past the longest line.
+func segmentsWidth(segs []styledSeg) int {
+	w := 0
+	for _, s := range segs {
+		w += runewidth.StringWidth(s.text)
+	}
+	return w
+}
+
+// clipSegments renders the row through a horizontal window [offset, offset+
+// width) of visual columns, styling each visible slice. A muted ‹ marks
+// content hidden off the left edge and › content hidden off the right; each
+// marker reserves one column so the result never exceeds width (and so never
+// wraps to a second line).
+func clipSegments(segs []styledSeg, offset, width int) string {
+	if width < 1 {
+		return ""
+	}
+	total := segmentsWidth(segs)
+
+	avail := width
+	left := ""
+	if offset > 0 {
+		left = styleMuted.Render("‹")
+		avail--
+	}
+	right := ""
+	if total-offset > avail {
+		right = styleMuted.Render("›")
+		avail--
+	}
+	if avail < 0 {
+		avail = 0
+	}
+
+	end := offset + avail
+	var b strings.Builder
+	b.WriteString(left)
+	col := 0
+	for _, seg := range segs {
+		segStart := col
+		segEnd := col + runewidth.StringWidth(seg.text)
+		col = segEnd
+		if segEnd <= offset || segStart >= end {
+			continue
+		}
+		lo := offset
+		if segStart > lo {
+			lo = segStart
+		}
+		hi := end
+		if segEnd < hi {
+			hi = segEnd
+		}
+		b.WriteString(seg.style.Render(sliceByCols(seg.text, lo-segStart, hi-segStart)))
+	}
+	b.WriteString(right)
+	return b.String()
+}
+
+// sliceByCols returns the substring of text covering visual columns [lo, hi).
+// A wide glyph that would straddle either boundary is dropped whole rather
+// than split; zero-width runes (combining marks, variation selectors) stay
+// attached to the base glyph they follow.
+func sliceByCols(text string, lo, hi int) string {
+	if hi <= lo {
+		return ""
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range text {
+		w := runewidth.RuneWidth(r)
+		if w == 0 {
+			if col > lo && col <= hi {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if col >= hi {
+			break
+		}
+		if col >= lo && col+w <= hi {
+			b.WriteRune(r)
+		}
+		col += w
+	}
+	return b.String()
 }
 
 
