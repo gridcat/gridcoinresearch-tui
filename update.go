@@ -153,14 +153,24 @@ func fetchStaking(rpc *RPCClient) tea.Cmd {
 		return stakingMsg{s, err}
 	}
 }
+// txRefreshDepth is how many blocks back listsinceblock holds its cursor,
+// i.e. how deep a transaction stays in the per-tick refresh window. It has to
+// exceed Gridcoin's coinstake maturity (~100 blocks on mainnet) so a stake
+// keeps getting re-fetched for its whole immature life and we catch it flip
+// from category "immature" to "generate" when it matures. The old value of 6
+// (our confirmed-depth threshold) was far too shallow: a stake left the window
+// after ~6 blocks but stays immature for ~100, so its cached "immature"
+// category went stale and never updated until a full re-seed. 120 covers
+// mainnet maturity with margin; on testnet (maturity ~10) it just re-reads a
+// few extra blocks, which is harmless.
+const txRefreshDepth = 120
+
 // fetchTxs fetches transaction deltas via listsinceblock. The cursor from
 // the previous successful fetch is passed in; on the very first call it
 // is the empty string and the daemon returns the full wallet history.
-// target_confirms=6 matches our "confirmed" threshold so shallow txs
-// keep getting refreshed confirmation counts on every tick.
 func fetchTxs(rpc *RPCClient, lastBlock string) tea.Cmd {
 	return func() tea.Msg {
-		resp, err := rpc.ListSinceBlock(lastBlock, 6, true)
+		resp, err := rpc.ListSinceBlock(lastBlock, txRefreshDepth, true)
 		return txsMsg{resp: resp, err: err}
 	}
 }
@@ -902,25 +912,31 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.tickCmd(), m.refreshAllCmd(), spin)
 }
 
-// txKey is the composite uniqueness key for a Transaction entry. It has
-// to distinguish entries from the same on-chain tx that differ in output
-// — gridcoinresearchd emits one entry per (tx, vout, recipient) tuple,
-// so hashing by txid alone would collapse multi-output transactions.
-// We store the amount as fixed-point satoshis (1 GRC = 1e8 sat) instead
-// of a raw float64 so two entries with "the same" amount always compare
-// equal — float representations of decimal amounts can round-trip
-// differently across RPC calls and defeat a naive ==.
+// txKey is the composite identity of a Transaction entry, used to update an
+// entry in place across refreshes instead of duplicating it. It has to
+// distinguish entries from the same on-chain tx that differ in output:
+// gridcoinresearchd emits one entry per (tx, vout, recipient) tuple, so
+// keying by txid alone would collapse multi-output transactions. Address and
+// the signed amount keep them distinct (a self-send shows a negative "send"
+// and a positive "receive" entry on the same txid). We store the amount as
+// fixed-point satoshis (1 GRC = 1e8 sat) instead of a raw float64 so two
+// entries with "the same" amount always compare equal: float representations
+// of decimal amounts can round-trip differently across RPC calls and defeat a
+// naive ==.
+//
+// Category is deliberately NOT in the key: it is mutable. A coinstake moves
+// from "immature" to "generate" as it matures, and keying on category would
+// treat the matured entry as brand new and append a duplicate instead of
+// replacing the immature one in place.
 type txKey struct {
-	TxID     string
-	Category string
-	Address  string
+	TxID      string
+	Address   string
 	AmountSat int64
 }
 
 func makeTxKey(tx Transaction) txKey {
 	return txKey{
 		TxID:      tx.TxID,
-		Category:  tx.Category,
 		Address:   tx.Address,
 		AmountSat: int64(math.Round(tx.Amount * 1e8)),
 	}

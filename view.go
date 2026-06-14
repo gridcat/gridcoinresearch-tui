@@ -2,7 +2,7 @@
 // the terminal. Every frame of the TUI is produced by View() calling one of
 // the render* helpers below. Keep in mind:
 //
-//   • View is a value receiver — it is pure, it cannot mutate state, and
+//   • View is a value receiver, it is pure, it cannot mutate state, and
 //     Bubble Tea is free to call it as often as it likes.
 //
 //   • We use lipgloss for styling. A lipgloss.Style is a reusable config:
@@ -10,7 +10,7 @@
 //     then .Render(string) to get the final ANSI-coloured text.
 //
 //   • lipgloss.JoinHorizontal / JoinVertical place already-rendered blocks
-//     next to each other — they measure the blocks, align them, and return
+//     next to each other, they measure the blocks, align them, and return
 //     a new string. No layout engine, just string concatenation with width
 //     awareness.
 //
@@ -140,7 +140,7 @@ func (m Model) renderDashboard() string {
 	footer := m.renderFooter()
 
 	// Transactions are the primary working area: they get the lion's share
-	// of the vertical budget. Addresses are a reference panel — capped at a
+	// of the vertical budget. Addresses are a reference panel, capped at a
 	// third of what's left after the fixed rows, with an absolute ceiling so
 	// very tall terminals don't waste space on them either.
 	available := m.height - lipgloss.Height(header) - lipgloss.Height(stats) - lipgloss.Height(footer)
@@ -198,6 +198,28 @@ func (m Model) renderHeader() string {
 	return styleBorder.Width(m.width - 2).Render(line)
 }
 
+// unconfirmedReceived totals coins received but not yet confirmed enough to
+// count toward Balance — the rows shown as "upcoming"/"incoming" in the tx
+// grid. We derive it from the tx list because getwalletinfo.unconfirmed_balance
+// does NOT include funds received from other people: it reads 0 for them while
+// the Qt wallet's own GetUnconfirmedBalance() counts them, so trusting that
+// field alone leaves freshly received coins invisible up top. Adding this back
+// in mirrors the Qt overview, where these land in "Unconfirmed" and Total but
+// not in Available/Balance.
+func (m Model) unconfirmedReceived() float64 {
+	var total float64
+	for _, tx := range m.txs {
+		if tx.Amount <= 0 {
+			continue
+		}
+		switch ClassifyTransaction(tx).Kind {
+		case TxStatusUpcoming, TxStatusIncoming:
+			total += tx.Amount
+		}
+	}
+	return total
+}
+
 func (m Model) renderStats() string {
 	if !m.loaded {
 		return styleBorder.Width(m.width - 2).Render(styleMuted.Render("loading wallet…"))
@@ -210,28 +232,39 @@ func (m Model) renderStats() string {
 		return styleValue.Render(FormatGRCPlain(v))
 	}
 
+	// The daemon's unconfirmed_balance omits funds received from others, so add
+	// those back from the tx list (see unconfirmedReceived). Safe to sum: the
+	// field only ever carries our own trusted pending (e.g. change from a send
+	// we made), a disjoint set from the received-pending we derive.
+	unconfirmed := m.wallet.UnconfirmedBalance + m.unconfirmedReceived()
+
 	balanceRow := statRow("Balance", fmtBal(m.wallet.Balance),
 		"Staking", m.stakingBadge())
-	unconfRow := statRow("Unconfirmed", fmtBal(m.wallet.UnconfirmedBalance),
+	unconfRow := statRow("Unconfirmed", fmtBal(unconfirmed),
 		"Wallet", m.lockBadge())
 	immatureRow := statRow("Immature", fmtBal(m.wallet.ImmatureBalance),
 		"Difficulty", styleValue.Render(fmt.Sprintf("%.4f", m.staking.Difficulty.Value())))
 
 	rows := []string{balanceRow, unconfRow, immatureRow}
-	// An in-flight stake is reported by getwalletinfo under `stake`/`newmint`,
-	// NOT in immature_balance (that field is coinbase-only, always 0 on this
-	// pure-PoS chain), so the three rows above miss it entirely. Surface it,
-	// but only while a stake is actually maturing — otherwise every idle
-	// wallet carries a permanent 0.00 row. No counterpart in the right column.
+	// A maturing stake shows up in getwalletinfo's stake/newmint, not in
+	// immature_balance: that field only counts coinbase outputs, which a
+	// pure PoS chain never has, so it stays 0. Without this row the locked
+	// coins are invisible. They've left balance but appear nowhere else.
+	// Skip it when there's no stake so idle wallets don't show a bare 0.00.
 	//
-	// We deliberately show ONE line, not both fields: in Gridcoin
-	// GetStake() and GetNewMint() run identical logic (sum the wallet's credit
-	// in any immature coinstake), so `stake` and `newmint` are always equal.
-	// `newmint` is a vestigial Peercoin name; we read `stake`. This matches
-	// the Qt wallet's single "Immature Stake" line.
+	// We read stake and ignore newmint, since in Gridcoin both run the same
+	// code (credit from immature coinstakes), so the two are always equal, and
+	// newmint is just a leftover Peercoin name. One line matches the Qt
+	// wallet's "Immature Stake".
 	if m.wallet.Stake != 0 {
 		rows = append(rows, statRow("Immature Stake", fmtBal(m.wallet.Stake), "", ""))
 	}
+
+	// Total mirrors the Qt wallet's overview: everything the wallet holds,
+	// spendable or not. Same sum the GUI uses (balance + stake + unconfirmed
+	// + immature), so the figure lines up 1:1 with what people see there.
+	total := m.wallet.Balance + m.wallet.Stake + unconfirmed + m.wallet.ImmatureBalance
+	rows = append(rows, statRow("Total", fmtBal(total), "", ""))
 
 	content := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	if m.walletErr != "" {
@@ -296,7 +329,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 		return box.Render(styleTitle.Render(title) + "\n" + styleBad.Render("error: "+m.addrsErr))
 	}
 	if len(m.addresses) == 0 {
-		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("wallet has no addresses yet — run `getnewaddress`"))
+		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("wallet has no addresses yet, run `getnewaddress`"))
 	}
 
 	// Available data rows inside the box: maxHeight - 2 (borders) - 1 (title row).
@@ -305,7 +338,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 		maxRows = 1
 	}
 
-	// Derive the window offset from the cursor — same pattern as renderTxList.
+	// Derive the window offset from the cursor, same pattern as renderTxList.
 	offset := 0
 	if m.addrCursor >= maxRows {
 		offset = m.addrCursor - maxRows + 1
@@ -342,7 +375,7 @@ func renderAddressRow(a ReceivedAddress, anonymous bool) string {
 		// The eye glyph hints at the meaning visually; the trailing word
 		// makes it explicit on terminals that fall back to a tofu box.
 		// styleWarn (orange) is the same shade used for "wallet locked"
-		// in the stats panel — both convey "this needs attention before
+		// in the stats panel, both convey "this needs attention before
 		// you try to sign or spend".
 		watch = "  " + styleWarn.Render("👁 watch-only")
 	}
@@ -365,10 +398,10 @@ func renderAddressRow(a ReceivedAddress, anonymous bool) string {
 // renderTxList draws the scrollable transactions panel, sized to fill the
 // vertical space that renderDashboard handed it. Scroll math:
 //
-//   txCursor  — index of the currently selected tx in m.txs
-//   offset    — index of the tx shown at the top of the visible window
+//   txCursor: index of the currently selected tx in m.txs
+//   offset: index of the tx shown at the top of the visible window
 //               (derived fresh every frame from cursor + maxRows)
-//   maxRows   — how many data rows fit inside the box this frame
+//   maxRows: how many data rows fit inside the box this frame
 //
 // We slide offset just enough to keep the cursor in view.
 func (m Model) renderTxList(height int) string {
@@ -410,7 +443,7 @@ func (m Model) renderTxList(height int) string {
 		line := renderTxRow(m.txs[i], m.anonymous)
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
-			// tx list leaves the cursor as a silent bookmark — symmetric
+			// tx list leaves the cursor as a silent bookmark, symmetric
 			// with the addresses panel so the two behave the same.
 			prefix = styleAccent.Render("▸ ")
 			line = styleRowSelected.Render(line)
@@ -476,7 +509,7 @@ func (m Model) renderFooter() string {
 	right := ""
 	// While any RPC fetch is in flight we show a spinning Braille dot
 	// so the user can see the TUI is alive and talking to the daemon.
-	// When all fetches settle the right side goes blank — a brief flash
+	// When all fetches settle the right side goes blank, a brief flash
 	// every refresh interval rather than a persistent clock.
 	if m.inflight > 0 {
 		right = styleAccent.Render(spinnerFrames[m.spinnerFrame] + " refreshing")
@@ -551,7 +584,7 @@ func (m Model) renderSendModal() string {
 // renderSignModal walks the sign-message wizard. Layout invariant: from
 // the message step onwards, the chosen signing address is rendered as a
 // persistent "Signing as: …" header at the top of the modal so the user
-// can never sign — or read a signature — without seeing which key was
+// can never sign, or read a signature, without seeing which key was
 // used. The address-input step suppresses the header because the input
 // field itself is the source of truth there.
 func (m Model) renderSignModal() string {
@@ -608,7 +641,7 @@ func (m Model) renderSignModal() string {
 
 	// Default width is comfortable for the input steps. On the result
 	// step we expand to whatever the signature needs so it fits on a
-	// single uninterrupted line — otherwise lipgloss wraps it inside the
+	// single uninterrupted line, otherwise lipgloss wraps it inside the
 	// modal and a mouse selection drags the right-side border in with
 	// the copied text. 6 = 2 border + 4 padding(1,2). Cap to the
 	// terminal width so we still render cleanly on narrow terminals
@@ -636,7 +669,7 @@ func (m Model) renderSignModal() string {
 
 // renderTxDetailModal shows the full raw data for the currently selected
 // transaction: full txid, full address, exact amount (8 decimals), block
-// hash, absolute timestamp, and status. It is read-only — any key closes
+// hash, absolute timestamp, and status. It is read-only, any key closes
 // it (handled in update.go::handleKey / case modeTxDetail).
 func (m Model) renderTxDetailModal() string {
 	if m.txCursor < 0 || m.txCursor >= len(m.txs) {
@@ -660,7 +693,7 @@ func (m Model) renderTxDetailModal() string {
 
 	addr := tx.Address
 	if addr == "" && (tx.Category == "generate" || tx.Category == "immature") {
-		addr = "(stake reward — no counterparty address)"
+		addr = "(stake reward, no counterparty address)"
 	} else if addr == "" {
 		addr = "—"
 	}
@@ -749,7 +782,7 @@ func (m Model) renderConfigModal() string {
 	userLine := row("User", cfgFieldUser, m.conf.user.View())
 	refreshLine := row("Refresh", cfgFieldRefresh, m.conf.refresh.View())
 
-	// Password is read-only — we only show whether it was resolved from
+	// Password is read-only, we only show whether it was resolved from
 	// flag/env/conf at startup. This keeps the passphrase off screen and
 	// saves the user from re-typing it to tweak unrelated fields.
 	passStatus := styleMuted.Render("not set")
