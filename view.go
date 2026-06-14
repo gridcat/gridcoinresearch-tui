@@ -378,10 +378,13 @@ func (m Model) renderAddresses(maxHeight int) string {
 	}
 
 	rowWidth := m.addrRowWidth()
+	// maxScroll walks every row, so compute it once and reuse it for both the
+	// clamp and the ←/→ hint below.
+	maxScroll := m.addrMaxScroll(rowWidth)
 	// Clamp the horizontal scroll so it can't pan past the longest row.
 	hoff := m.addrHScroll
-	if max := m.addrMaxScroll(rowWidth); hoff > max {
-		hoff = max
+	if hoff > maxScroll {
+		hoff = maxScroll
 	}
 
 	// Title carries the total count plus a "cursor/total" indicator when
@@ -391,7 +394,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 	if len(m.addresses) > maxRows {
 		header += fmt.Sprintf("  %d/%d", m.addrCursor+1, len(m.addresses))
 	}
-	if m.focusedArea == focusAddr && m.addrMaxScroll(rowWidth) > 0 {
+	if m.focusedArea == focusAddr && maxScroll > 0 {
 		header += styleMuted.Render("  ←/→")
 	}
 	lines := []string{styleTitle.Render(header)}
@@ -538,7 +541,6 @@ func sliceByCols(text string, lo, hi int) string {
 	}
 	return b.String()
 }
-
 
 // renderTxList draws the scrollable transactions panel, sized to fill the
 // vertical space that renderDashboard handed it. Scroll math:
