@@ -217,7 +217,23 @@ func (m Model) renderStats() string {
 	immatureRow := statRow("Immature", fmtBal(m.wallet.ImmatureBalance),
 		"Difficulty", styleValue.Render(fmt.Sprintf("%.4f", m.staking.Difficulty.Value())))
 
-	content := lipgloss.JoinVertical(lipgloss.Left, balanceRow, unconfRow, immatureRow)
+	rows := []string{balanceRow, unconfRow, immatureRow}
+	// An in-flight stake is reported by getwalletinfo under `stake`/`newmint`,
+	// NOT in immature_balance (that field is coinbase-only, always 0 on this
+	// pure-PoS chain), so the three rows above miss it entirely. Surface it,
+	// but only while a stake is actually maturing — otherwise every idle
+	// wallet carries a permanent 0.00 row. No counterpart in the right column.
+	//
+	// We deliberately show ONE line, not both fields: in Gridcoin
+	// GetStake() and GetNewMint() run identical logic (sum the wallet's credit
+	// in any immature coinstake), so `stake` and `newmint` are always equal.
+	// `newmint` is a vestigial Peercoin name; we read `stake`. This matches
+	// the Qt wallet's single "Immature Stake" line.
+	if m.wallet.Stake != 0 {
+		rows = append(rows, statRow("Immature Stake", fmtBal(m.wallet.Stake), "", ""))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	if m.walletErr != "" {
 		content = lipgloss.JoinVertical(lipgloss.Left, content, "", styleBad.Render("error: "+m.walletErr))
 	}

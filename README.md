@@ -2,26 +2,26 @@
 
 ![example](https://salmon-ruling-marlin-296.mypinata.cloud/ipfs/bafybeiedy7pnhkxqoankdveazxyfsf6omdpvglzllj5svfpmtsj3sf6ply)
 
-A tiny, full-screen terminal dashboard for a running [Gridcoin Research](https://gridcoin.us) wallet daemon (`gridcoinresearchd`). One static binary, no runtime dependencies.
+A tiny, full-screen terminal dashboard for a running [Gridcoin Research](https://gridcoin.us) wallet daemon (`gridcoinresearchd`). One static binary, zero runtime dependencies.
 
 Shows:
 
 - **Balance** (confirmed / unconfirmed / immature)
 - **Staking** status and difficulty
-- **Wallet lock** state, with the unlock countdown ticking down live
+- **Wallet lock** state with live unlock countdown
 - **Current block height**
 - **Your wallet addresses** with labels and amounts received
-- **Recent transactions** with a readable status (`upcoming` / `incoming` / `sending` / `confirmed` / `stake`)
-- **Transaction details** (full txid, address, fee, block hash, timestamps). Press `enter` on the selected row.
-- **Send GRC** to any address, with pre-flight address validation and a wallet unlock prompt only when needed
+- **Recent transactions** with human-readable status (`upcoming` / `incoming` / `sending` / `confirmed` / `stake`)
+- **Transaction details** (full txid, address, fee, block hash, timestamps) — press `enter` on a selected row
+- **Send GRC** to any address, with pre-flight address validation and on-demand wallet unlock
 - **Sign messages** with any address you own (proves control of the address)
-- **Live config panel.** Edit network, host, port, credentials, and refresh interval at runtime, without restarting.
+- **Live config panel** — edit network / host / port / credentials / refresh interval at runtime without restarting
 
-Supports both mainnet and testnet via a CLI flag.
+Supports both **mainnet** and **testnet** via a CLI flag.
 
 ## Install
 
-Download a pre-built binary from the [Releases](https://github.com/gridcat/gridcoinresearch-tui/releases) page. Every release is notarised on the Gridcoin blockchain via [gridcoin-stamp-action](https://github.com/gridcat/gridcoin-stamp-action). The `checksums.txt` hash is recorded on-chain, so you can independently verify the artifacts.
+Download a pre-built binary from the [Releases](https://github.com/gridcat/gridcoinresearch-tui/releases) page. Every release is notarised on the Gridcoin blockchain via [gridcoin-stamp-action](https://github.com/gridcat/gridcoin-stamp-action) — the `checksums.txt` hash is recorded on-chain so you can independently verify the artifacts.
 
 ```sh
 curl -sSL https://github.com/gridcat/gridcoinresearch-tui/releases/latest/download/gridcoinresearch-tui_linux_amd64.tar.gz | tar -xz
@@ -41,7 +41,7 @@ make build
 
 ### Local (same machine as the wallet)
 
-Zero config. Reads `~/.GridcoinResearch/gridcoinresearch.conf`, connects to `127.0.0.1`:
+Zero config — reads `~/.GridcoinResearch/gridcoinresearch.conf`, connects to `127.0.0.1`:
 
 ```sh
 ./gridcoinresearch-tui              # mainnet
@@ -84,7 +84,7 @@ export GRC_RPC_PASSWORD=mypass
 
 Flags accept both single- and double-dash forms (`-testnet` and `--testnet` are equivalent), to match Go's standard flag parser. `--help` prints the single-dash form by convention.
 
-Resolution order, highest wins: flag, then env var, then conf file, then the built-in default.
+Resolution order, highest wins: **flag → env var → conf file → built-in default**.
 
 ## Keybindings
 
@@ -101,28 +101,28 @@ Resolution order, highest wins: flag, then env var, then conf file, then the bui
 | `esc` | Close a modal |
 | `q` / `ctrl+c` | Quit |
 
-Inside the send and config modals the focused field is marked with `▸ `, so you can still tell what is active on terminals without colour support. The selected transaction row gets the same marker.
+Inside the send and config modals the focused field is marked with `▸ ` so you can tell what is active on terminals without colour support. The selected transaction row gets the same marker.
 
 ## Addresses
 
-The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Addresses are printed at full length, so you can select them with your terminal's native mouse selection and copy them the usual way. On small terminals the panel is capped so it cannot push the transactions list off screen. A `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
+The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Addresses are printed at full length so you can select them with your terminal's native mouse selection and copy them with your usual terminal shortcut. On small terminals the panel is capped so it cannot push the transactions list off screen — a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
 
 ## Sign messages
 
-Press `m` to sign a message with one of your wallet's addresses. Anyone can verify the resulting base64 signature with `gridcoinresearchd verifymessage <address> <signature> <message>`. A successful verification proves you hold the private key for that address.
+Press `m` to sign a message with one of your wallet's addresses. The resulting base64 signature can be verified by anyone via `gridcoin-cli verifymessage <address> <signature> <message>`, proving you hold the private key for that address.
 
-If the addresses panel is focused (`tab` to switch), the highlighted address is pre-filled. The chosen address stays at the top of the modal on every step, so you always know which key is signing.
+If the addresses panel is focused (`tab` to switch), the highlighted address is pre-filled. The chosen address stays visible at the top of the modal on every step, so you always know which key the signature is being produced with.
 
-The wallet is only unlocked when it has to be. An unencrypted wallet, or one you have already unlocked yourself (e.g. for staking), skips the passphrase prompt entirely. When the TUI does the unlock itself, it re-locks immediately after the signature.
+The wallet is only unlocked when it has to be — an unencrypted wallet, or one you have already unlocked yourself (e.g. for staking), skips the passphrase prompt entirely. When the TUI did do the unlock, it re-locks immediately after the signature is produced.
 
 ## Config panel
 
-Edits in the config panel are session-only. They apply immediately (the RPC client is rebuilt against the new endpoint and a fresh fetch runs), but they are not written to disk. Next launch re-resolves from flags, env, and conf as usual. Toggling the network auto-updates the port field if it still held the old network's default, so you don't need to remember port numbers.
+Edits in the config panel are **session-only** — they apply immediately (the RPC client is rebuilt against the new endpoint and a fresh fetch runs) but are not written to disk. Next launch re-resolves from flags/env/conf as usual. Toggling the network auto-updates the port field if it still held the old network's default, so you don't need to remember port numbers.
 
 ## Security notes
 
 - The TUI never stores your wallet passphrase. It is held in memory only for the duration of a single `sendtoaddress` call, then the wallet is immediately re-locked via `walletlock`.
-- Pass `--rpc-password` via env var, not the command line. Flags are visible in `ps`. Or omit it entirely: when `--rpc-user` resolves but no password does, the TUI prompts for the password at startup with masked input (skipped on non-interactive stdin).
+- Pass `--rpc-password` via env var, not the command line — flags are visible in `ps`. Or omit it entirely: when `--rpc-user` resolves but no password does, the TUI prompts for the password at startup with masked input (skipped on non-interactive stdin).
 - This tool talks plain HTTP JSON-RPC. Do not expose your daemon's RPC port over the public internet. Use an SSH tunnel for remote access:
   ```sh
   ssh -L 15715:127.0.0.1:15715 user@node.example.com
@@ -132,7 +132,3 @@ Edits in the config panel are session-only. They apply immediately (the RPC clie
 ## License
 
 MIT
-
----
-
-<p align="center">Made with ❤️ by @gridcat</p>
