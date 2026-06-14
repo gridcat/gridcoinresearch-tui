@@ -530,7 +530,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "right", "l":
 		// Pan the addresses panel right, clamped to the widest row.
-		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.addrRowWidth()) {
+		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.panelRowWidth()) {
 			m.addrHScroll++
 		}
 		return m, nil

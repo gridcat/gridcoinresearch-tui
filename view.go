@@ -42,6 +42,7 @@ var (
 	colorMainnet = lipgloss.Color("42")
 	colorTestnet = lipgloss.Color("214")
 	colorAccent  = lipgloss.Color("75")
+	colorRowSelected = lipgloss.Color("236") // highlight background for the selected row
 
 	// styleBorder is the rounded-corner box used for every panel on the
 	// dashboard. Padding(0, 1) inserts one column of horizontal breathing
@@ -59,10 +60,6 @@ var (
 	styleBad    = lipgloss.NewStyle().Foreground(colorBad)
 	styleAccent = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	styleTitle  = lipgloss.NewStyle().Foreground(colorValue).Bold(true)
-
-	styleRowSelected = lipgloss.NewStyle().
-				Background(lipgloss.Color("236")).
-				Foreground(colorValue)
 
 	// styleBorderFocused is the same rounded box but painted with the
 	// accent colour so the user can tell at a glance which panel arrow
@@ -313,12 +310,12 @@ func (m Model) lockBadge() string {
 	return styleGood.Render("● unlocked " + FormatDuration(remaining))
 }
 
-// addrRowWidth is the visual column budget for one address row: the box's
-// inner text area (m.width-4 for border + padding) minus the 2-column row
-// prefix. Clamped to at least 1 so tiny terminals don't produce a negative
-// width. Shared by the renderer and the left/right key handler so their
-// scroll clamps agree.
-func (m Model) addrRowWidth() int {
+// panelRowWidth is the visual column budget for one row in a full-width panel:
+// the box's inner text area (m.width-4 for border + padding) minus the
+// 2-column row prefix. Clamped to at least 1 so tiny terminals don't produce a
+// negative width. Shared by the address and transaction renderers (and the
+// address left/right key handler) so their clamps and highlight padding agree.
+func (m Model) panelRowWidth() int {
 	w := m.width - 6
 	if w < 1 {
 		w = 1
@@ -377,7 +374,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 		offset = m.addrCursor - maxRows + 1
 	}
 
-	rowWidth := m.addrRowWidth()
+	rowWidth := m.panelRowWidth()
 	// maxScroll walks every row, so compute it once and reuse it for both the
 	// clamp and the ←/→ hint below.
 	maxScroll := m.addrMaxScroll(rowWidth)
@@ -407,8 +404,10 @@ func (m Model) renderAddresses(maxHeight int) string {
 		prefix := "  "
 		row := clipSegments(addressRowSegments(m.addresses[i], m.anonymous), hoff, rowWidth)
 		if i == m.addrCursor && m.focusedArea == focusAddr {
-			prefix = styleAccent.Render("▸ ")
-			row = styleRowSelected.Render(row)
+			// Carry the highlight background through the cursor marker and
+			// across the whole row, so it's coloured edge to edge.
+			prefix = styleAccent.Background(colorRowSelected).Render("▸ ")
+			row = fillBackground(row, rowWidth)
 		}
 		lines = append(lines, prefix+row)
 	}
@@ -513,6 +512,31 @@ func clipSegments(segs []styledSeg, offset, width int) string {
 	return b.String()
 }
 
+// fillBackground paints the selection background across an already-rendered
+// line and pads it to width columns, so a highlighted row is coloured edge to
+// edge. We can't just wrap the line in a background style: every style reset
+// inside it (lipgloss ends each coloured run with one) would clear the
+// background, leaving only the start tinted — which is the bug this fixes.
+// Instead we re-assert the background escape immediately after every reset and
+// fill the remainder with background spaces. The escape sequences are derived
+// from lipgloss itself (via a NUL-delimited probe) so they match whatever
+// colour profile is active; on a no-colour terminal the probe yields no escape
+// and the line passes through unchanged.
+func fillBackground(line string, width int) string {
+	probe := lipgloss.NewStyle().Background(colorRowSelected).Render("\x00")
+	i := strings.IndexByte(probe, 0)
+	if i <= 0 {
+		return line // no-colour profile: nothing to paint
+	}
+	open, reset := probe[:i], probe[i+1:]
+
+	body := open + strings.ReplaceAll(line, reset, reset+open)
+	if pad := width - lipgloss.Width(line); pad > 0 {
+		body += strings.Repeat(" ", pad)
+	}
+	return body + reset
+}
+
 // sliceByCols returns the substring of text covering visual columns [lo, hi).
 // A wide glyph that would straddle either boundary is dropped whole rather
 // than split; zero-width runes (combining marks, variation selectors) stay
@@ -591,9 +615,11 @@ func (m Model) renderTxList(height int) string {
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
 			// tx list leaves the cursor as a silent bookmark, symmetric
-			// with the addresses panel so the two behave the same.
-			prefix = styleAccent.Render("▸ ")
-			line = styleRowSelected.Render(line)
+			// with the addresses panel so the two behave the same. Paint the
+			// whole row via fillBackground (the same edge-to-edge highlight
+			// the addresses panel uses).
+			prefix = styleAccent.Background(colorRowSelected).Render("▸ ")
+			line = fillBackground(line, m.panelRowWidth())
 		}
 		lines = append(lines, prefix+line)
 	}
