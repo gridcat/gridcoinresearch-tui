@@ -391,7 +391,7 @@ func renderAddressRow(a ReceivedAddress, anonymous bool) string {
 			amount = "  " + styleGood.Render("received "+FormatGRCPlain(a.Amount))
 		}
 	}
-	return "  " + addr + watch + label + amount
+	return addr + watch + label + amount
 }
 
 
