@@ -67,6 +67,12 @@ type addrsMsg struct {
 	a   []ReceivedAddress
 	err error
 }
+
+// addrMineMsg carries authoritative ownership flags resolved by
+// validateaddress, keyed by address, to be merged into Model.addrMine.
+type addrMineMsg struct {
+	mine map[string]bool
+}
 type validateMsg struct {
 	v   ValidateAddress
 	err error
@@ -182,6 +188,32 @@ func fetchAddrs(rpc *RPCClient) tea.Cmd {
 	return func() tea.Msg {
 		a, err := rpc.ListReceivedByAddress()
 		return addrsMsg{a, err}
+	}
+}
+
+// fetchAddrOwnership resolves the ownership of each given address via
+// validateaddress, serially so the TUI never holds more than one daemon RPC
+// worker at a time (the same good-neighbour policy as refreshAllCmd). Callers
+// pass only addresses whose ownership isn't cached yet, so on an idle wallet
+// this fires once per genuinely new address and then stays quiet.
+//
+// We need it because listreceivedbyaddress returns the whole address book —
+// including foreign addresses you've merely labelled — and those carry no
+// involvesWatchonly flag, so they're otherwise indistinguishable from your
+// own. validateaddress.ismine is (IsMine != ISMINE_NO): true for spendable
+// and watch-only addresses, false only for foreign ones — the same test the
+// official Qt wallet uses to split its Receiving and Sending address lists.
+func fetchAddrOwnership(rpc *RPCClient, addrs []string) tea.Cmd {
+	return func() tea.Msg {
+		mine := make(map[string]bool, len(addrs))
+		for _, a := range addrs {
+			v, err := rpc.ValidateAddress(a)
+			if err != nil {
+				continue // leave unresolved; retried on the next address refresh
+			}
+			mine[a] = v.IsMine
+		}
+		return addrMineMsg{mine}
 	}
 }
 
@@ -395,6 +427,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Mirror the tx-list clamp so the cursor never points past
 			// the end when the daemon returns a shorter list than before.
 			m.addrCursor = clampCursor(m.addrCursor, len(m.addresses))
+			// Resolve ownership for any address we haven't validated yet so
+			// the panel can flag foreign (not-yours) entries.
+			if unknown := m.unknownOwnership(); len(unknown) > 0 {
+				spin := m.bumpInflight(1)
+				return m, tea.Batch(fetchAddrOwnership(m.rpc, unknown), spin)
+			}
+		}
+		return m, nil
+
+	case addrMineMsg:
+		m.finishFetch()
+		for a, mine := range msg.mine {
+			m.addrMine[a] = mine
 		}
 		return m, nil
 

@@ -208,6 +208,12 @@ type Model struct {
 	txs        []Transaction
 	addresses  []ReceivedAddress
 	lastUpdate time.Time
+	// addrMine caches authoritative per-address ownership (validateaddress
+	// ismine). listreceivedbyaddress returns the entire address book —
+	// foreign addresses you've merely labelled included — so the My
+	// Addresses panel can't tell which entries are actually yours without
+	// this. A missing key means "not resolved yet". See fetchAddrOwnership.
+	addrMine map[string]bool
 
 	// txsLastBlock is the "lastblock" cursor returned by the previous
 	// listsinceblock call. Empty on first launch — an empty cursor tells
@@ -304,6 +310,7 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		// here means the spinner's first tick sees a positive counter
 		// and doesn't immediately stop itself.
 		inflight: 5,
+		addrMine: make(map[string]bool),
 		send:     sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
 		sign:     signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
 		conf:     newConfigState(cfg),
@@ -323,6 +330,45 @@ func newPassphraseInput() textinput.Model {
 	ti.CharLimit = 128
 	ti.Width = 40
 	return ti
+}
+
+// addrOwnership is the resolved ownership of an address shown in the My
+// Addresses panel. listreceivedbyaddress returns the whole address book, so a
+// labelled foreign address (a send target) appears there looking just like
+// one of your own — the danger the issue tracker flags. validateaddress tells
+// the two apart; until it has, we say nothing rather than imply ownership.
+type addrOwnership int
+
+const (
+	ownUnknown addrOwnership = iota // validateaddress hasn't resolved it yet
+	ownMine                         // validateaddress reported ismine
+	ownForeign                      // validateaddress reported NOT ismine
+)
+
+// ownership reports whether addr is one of the wallet's own addresses,
+// reading the cache populated by fetchAddrOwnership.
+func (m Model) ownership(addr string) addrOwnership {
+	mine, ok := m.addrMine[addr]
+	switch {
+	case !ok:
+		return ownUnknown
+	case mine:
+		return ownMine
+	default:
+		return ownForeign
+	}
+}
+
+// unknownOwnership returns the currently shown addresses whose ownership
+// hasn't been resolved yet, so callers can validate just those.
+func (m Model) unknownOwnership() []string {
+	var out []string
+	for _, a := range m.addresses {
+		if _, ok := m.addrMine[a.Address]; !ok {
+			out = append(out, a.Address)
+		}
+	}
+	return out
 }
 
 // newConfigState builds a fresh configState pre-populated with the values

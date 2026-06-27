@@ -10,7 +10,7 @@ Shows:
 - **Staking** status and difficulty
 - **Wallet lock** state with live unlock countdown
 - **Current block height**
-- **Your wallet addresses** with labels and amounts received
+- **Your wallet addresses** with labels and amounts received, with any address you do not actually own flagged so you never copy it by mistake
 - **Recent transactions** with human-readable status (`upcoming` / `incoming` / `sending` / `confirmed` / `stake`)
 - **Transaction details** (full txid, address, fee, block hash, timestamps), press `enter` on a selected row
 - **Send GRC** to any address, with pre-flight address validation and on-demand wallet unlock
@@ -107,7 +107,7 @@ Inside the send and config modals the focused field is marked with `▸ ` so you
 
 ## Addresses
 
-The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Each row shows the address plus its label, watch-only flag, and amount received. Rows that are too wide for the panel are clipped rather than wrapped (a muted `‹`/`›` marks hidden content); focus the panel with `tab` and use `←`/`→` to pan sideways and read the rest. Press `e` on the selected address to set or change its label (an empty value clears it); the change is written to the wallet via `setaccount` and shown after the next refresh. At normal terminal widths the address itself always fits, so you can still mouse-select and copy it with your terminal's native shortcut. On small terminals the panel is also capped vertically so it cannot push the transactions list off screen, a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
+The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Each row shows the address plus its label, watch-only flag, and amount received. Some rows are flagged `⚠ not yours` in red: these are addresses you have only labelled but do not actually own (for example, someone else's address you saved as a send target). They turn up here because `listreceivedbyaddress` hands back your whole address book rather than just your own keys; the flag comes straight from the daemon's own `validateaddress` `ismine` answer, so you never copy a foreign address thinking it is one of yours. Rows that are too wide for the panel are clipped rather than wrapped (a muted `‹`/`›` marks hidden content); focus the panel with `tab` and use `←`/`→` to pan sideways and read the rest. Press `e` on the selected address to set or change its label (an empty value clears it); the change is written to the wallet via `setaccount` and shown after the next refresh. One quirk worth knowing: when you relabel an address that is its account's current receiving address, gridcoinresearchd also generates a fresh replacement address that keeps the old label. That is Gridcoin's legacy account system rather than anything the TUI does (the Qt wallet sidesteps it only by setting labels in-process, and Gridcoin exposes no label RPC that skips the behaviour); no coins are affected, you simply end up with one extra address. At normal terminal widths the address itself always fits, so you can still mouse-select and copy it with your terminal's native shortcut. On small terminals the panel is also capped vertically so it cannot push the transactions list off screen, a `+N more` line appears when addresses don't fit; resize the window taller to see all of them.
 
 ## Sign messages
 

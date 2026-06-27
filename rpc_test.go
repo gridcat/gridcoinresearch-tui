@@ -1,15 +1,15 @@
 // Unit tests. A quick Go testing primer for the unfamiliar:
 //
-//   • Test functions must start with "Test" and take *testing.T.
-//   • `go test ./...` discovers and runs every Test* function.
-//   • t.Errorf records a failure and keeps running; t.Fatal stops this test.
-//   • t.Run(name, func) creates a "sub-test" so table-driven tests get
+//   - Test functions must start with "Test" and take *testing.T.
+//   - `go test ./...` discovers and runs every Test* function.
+//   - t.Errorf records a failure and keeps running; t.Fatal stops this test.
+//   - t.Run(name, func) creates a "sub-test" so table-driven tests get
 //     individual pass/fail lines in the output.
-//   • t.Setenv sets an env var for the duration of the test and restores
+//   - t.Setenv sets an env var for the duration of the test and restores
 //     it afterwards — safer than poking os.Setenv directly.
-//   • t.TempDir() gives a unique scratch directory that is auto-deleted
+//   - t.TempDir() gives a unique scratch directory that is auto-deleted
 //     when the test ends.
-//   • httptest.NewServer spins up a real HTTP server on a random port that
+//   - httptest.NewServer spins up a real HTTP server on a random port that
 //     the test can point its client at, so we don't need a real daemon.
 package main
 
@@ -26,9 +26,10 @@ import (
 
 // TestRPCClientCallSuccess spins up a fake JSON-RPC server, points the
 // client at it, and checks that:
-//   (a) we send the right method name,
-//   (b) we send a Basic auth header when credentials are present,
-//   (c) we correctly decode the result into the caller's struct.
+//
+//	(a) we send the right method name,
+//	(b) we send a Basic auth header when credentials are present,
+//	(c) we correctly decode the result into the caller's struct.
 func TestRPCClientCallSuccess(t *testing.T) {
 	var gotMethod string
 	var gotAuth string
@@ -237,5 +238,62 @@ func TestFormatGRC(t *testing.T) {
 		if got := FormatGRC(tc.in); got != tc.want {
 			t.Errorf("FormatGRC(%v) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// segText concatenates the visible text of a row's segments so a test can
+// assert what the My Addresses panel shows without caring about styling.
+func segText(segs []styledSeg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		b.WriteString(s.text)
+	}
+	return b.String()
+}
+
+// TestAddressRowOwnership covers the fix for the "My Addresses shows
+// not-is-mine addresses" issue: listreceivedbyaddress returns the whole
+// address book, so a foreign (validateaddress ismine=false) address must be
+// flagged, while owned and not-yet-resolved addresses must NOT be flagged.
+func TestAddressRowOwnership(t *testing.T) {
+	addr := ReceivedAddress{Address: "S1foreign", Account: "alice"}
+	cases := []struct {
+		name     string
+		own      addrOwnership
+		wantWarn bool
+	}{
+		{"foreign address is flagged", ownForeign, true},
+		{"own address is not flagged", ownMine, false},
+		{"unresolved address is not flagged", ownUnknown, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := segText(addressRowSegments(addr, false, tc.own))
+			if has := strings.Contains(got, "not yours"); has != tc.wantWarn {
+				t.Errorf("row %q: warn=%v, want %v", got, has, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestOwnershipHelpers checks the cache lookups that drive the panel: a missing
+// key is unknown, and unknownOwnership returns exactly the unresolved rows.
+func TestOwnershipHelpers(t *testing.T) {
+	m := Model{
+		addresses: []ReceivedAddress{{Address: "mine"}, {Address: "foreign"}, {Address: "new"}},
+		addrMine:  map[string]bool{"mine": true, "foreign": false},
+	}
+	if got := m.ownership("mine"); got != ownMine {
+		t.Errorf(`ownership("mine") = %v, want ownMine`, got)
+	}
+	if got := m.ownership("foreign"); got != ownForeign {
+		t.Errorf(`ownership("foreign") = %v, want ownForeign`, got)
+	}
+	if got := m.ownership("new"); got != ownUnknown {
+		t.Errorf(`ownership("new") = %v, want ownUnknown`, got)
+	}
+	unknown := m.unknownOwnership()
+	if len(unknown) != 1 || unknown[0] != "new" {
+		t.Errorf("unknownOwnership() = %v, want [new]", unknown)
 	}
 }

@@ -330,7 +330,7 @@ func (m Model) panelRowWidth() int {
 func (m Model) addrMaxScroll(rowWidth int) int {
 	widest := 0
 	for _, a := range m.addresses {
-		if w := segmentsWidth(addressRowSegments(a, m.anonymous)); w > widest {
+		if w := segmentsWidth(addressRowSegments(a, m.anonymous, m.ownership(a.Address))); w > widest {
 			widest = w
 		}
 	}
@@ -402,7 +402,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 	}
 	for i := offset; i < end; i++ {
 		prefix := "  "
-		row := clipSegments(addressRowSegments(m.addresses[i], m.anonymous), hoff, rowWidth)
+		row := clipSegments(addressRowSegments(m.addresses[i], m.anonymous, m.ownership(m.addresses[i].Address)), hoff, rowWidth)
 		if i == m.addrCursor && m.focusedArea == focusAddr {
 			// Carry the highlight background through the cursor marker and
 			// across the whole row, so it's coloured edge to edge.
@@ -427,9 +427,15 @@ type styledSeg struct {
 // addressRowSegments builds the coloured runs for one address: the address
 // itself, then optional watch-only flag, label, and received amount, each
 // separated by a two-space gap.
-func addressRowSegments(a ReceivedAddress, anonymous bool) []styledSeg {
+func addressRowSegments(a ReceivedAddress, anonymous bool, own addrOwnership) []styledSeg {
 	segs := []styledSeg{{a.Address, styleValue}}
 	gap := styledSeg{"  ", styleMuted}
+	if own == ownForeign {
+		// listreceivedbyaddress includes addresses you've only labelled but
+		// don't own; flag them in red (a stronger cue than watch-only's
+		// orange) so a foreign address is never mistaken for one of yours.
+		segs = append(segs, gap, styledSeg{"⚠ not yours", styleBad})
+	}
 	if a.InvolvesWatchonly {
 		// The eye glyph hints at the meaning visually; the trailing word
 		// makes it explicit on terminals that fall back to a tofu box.
