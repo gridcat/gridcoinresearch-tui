@@ -2,19 +2,19 @@
 // the terminal. Every frame of the TUI is produced by View() calling one of
 // the render* helpers below. Keep in mind:
 //
-//   • View is a value receiver, it is pure, it cannot mutate state, and
+//   - View is a value receiver, it is pure, it cannot mutate state, and
 //     Bubble Tea is free to call it as often as it likes.
 //
-//   • We use lipgloss for styling. A lipgloss.Style is a reusable config:
+//   - We use lipgloss for styling. A lipgloss.Style is a reusable config:
 //     .Foreground(color), .Bold(true), .Width(n), .Border(…), .Padding(…),
 //     then .Render(string) to get the final ANSI-coloured text.
 //
-//   • lipgloss.JoinHorizontal / JoinVertical place already-rendered blocks
+//   - lipgloss.JoinHorizontal / JoinVertical place already-rendered blocks
 //     next to each other, they measure the blocks, align them, and return
 //     a new string. No layout engine, just string concatenation with width
 //     awareness.
 //
-//   • All styles that are used on the per-render hot path (every row of
+//   - All styles that are used on the per-render hot path (every row of
 //     the tx list, for example) are defined once at package level so we
 //     don't allocate a fresh Style struct on each frame.
 package main
@@ -32,16 +32,16 @@ import (
 // decimal string, and the terminal renders it via ANSI SGR. Where the
 // terminal doesn't support colour, lipgloss strips the escape sequences.
 var (
-	colorBorder  = lipgloss.Color("240")
-	colorMuted   = lipgloss.Color("244")
-	colorLabel   = lipgloss.Color("250")
-	colorValue   = lipgloss.Color("255")
-	colorGood    = lipgloss.Color("42")  // green
-	colorWarn    = lipgloss.Color("214") // orange
-	colorBad     = lipgloss.Color("203") // red
-	colorMainnet = lipgloss.Color("42")
-	colorTestnet = lipgloss.Color("214")
-	colorAccent  = lipgloss.Color("75")
+	colorBorder      = lipgloss.Color("240")
+	colorMuted       = lipgloss.Color("244")
+	colorLabel       = lipgloss.Color("250")
+	colorValue       = lipgloss.Color("255")
+	colorGood        = lipgloss.Color("42")  // green
+	colorWarn        = lipgloss.Color("214") // orange
+	colorBad         = lipgloss.Color("203") // red
+	colorMainnet     = lipgloss.Color("42")
+	colorTestnet     = lipgloss.Color("214")
+	colorAccent      = lipgloss.Color("75")
 	colorRowSelected = lipgloss.Color("236") // highlight background for the selected row
 
 	// styleBorder is the rounded-corner box used for every panel on the
@@ -127,11 +127,11 @@ func (m Model) View() string {
 // vertical-budget math so nothing gets pushed off screen when the terminal
 // is short. Pseudo-layout:
 //
-//     ┌────────────── header ──────────────┐
-//     │───────────── stats ─────────────│
-//     │─────── My Addresses (capped) ───│
-//     │─────── Transactions (stretch) ──│
-//     │───────────── footer ────────────│
+//	┌────────────── header ──────────────┐
+//	│───────────── stats ─────────────│
+//	│─────── My Addresses (capped) ───│
+//	│─────── Transactions (stretch) ──│
+//	│───────────── footer ────────────│
 //
 // Transactions get priority; addresses are capped to min(available/3, 8).
 func (m Model) renderDashboard() string {
@@ -575,10 +575,10 @@ func sliceByCols(text string, lo, hi int) string {
 // renderTxList draws the scrollable transactions panel, sized to fill the
 // vertical space that renderDashboard handed it. Scroll math:
 //
-//   txCursor: index of the currently selected tx in m.txs
-//   offset: index of the tx shown at the top of the visible window
-//               (derived fresh every frame from cursor + maxRows)
-//   maxRows: how many data rows fit inside the box this frame
+//	txCursor: index of the currently selected tx in m.txs
+//	offset: index of the tx shown at the top of the visible window
+//	            (derived fresh every frame from cursor + maxRows)
+//	maxRows: how many data rows fit inside the box this frame
 //
 // We slide offset just enough to keep the cursor in view.
 func (m Model) renderTxList(height int) string {
@@ -858,6 +858,7 @@ func (m Model) renderEditLabelModal() string {
 		styleLabel.Render("Address: ") + styleAccent.Render(m.edit.address)
 
 	body := "Label:\n\n" + m.edit.label.View()
+	body += "\n\n" + styleMuted.Render("Heads-up: the daemon may spawn an extra address with the old label on save. harmless quirk, coins unaffected.")
 	if m.edit.errMsg != "" {
 		body += "\n\n" + styleBad.Render(m.edit.errMsg)
 	} else {
@@ -1054,4 +1055,3 @@ func (m Model) renderConfigModal() string {
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
-
