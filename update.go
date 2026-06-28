@@ -426,7 +426,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addrsErr = ""
 			// Mirror the tx-list clamp so the cursor never points past
 			// the end when the daemon returns a shorter list than before.
-			m.addrCursor = clampCursor(m.addrCursor, len(m.addresses))
+			// Clamp against the active tab's length, since that's what the
+			// cursor indexes into.
+			m.addrCursor = clampCursor(m.addrCursor, len(m.visibleAddresses()))
 			// Resolve ownership for any address we haven't validated yet so
 			// the panel can flag foreign (not-yours) entries.
 			if unknown := m.unknownOwnership(); len(unknown) > 0 {
@@ -441,6 +443,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for a, mine := range msg.mine {
 			m.addrMine[a] = mine
 		}
+		// Resolving ownership can move a row out of the active tab (e.g. an
+		// unknown row turns out foreign and leaves the Mine view), so re-clamp
+		// the cursor against the now-current visible length.
+		m.addrCursor = clampCursor(m.addrCursor, len(m.visibleAddresses()))
 		return m, nil
 
 	case validateMsg:
@@ -544,10 +550,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openSignModal()
 		return m, nil
 	case "e":
-		// Edit the label of the highlighted address — only meaningful when
-		// the addresses panel is focused and has a valid selection. The
-		// cursor>=0 && <len guard also covers the empty-list case.
-		if m.focusedArea == focusAddr && m.addrCursor >= 0 && m.addrCursor < len(m.addresses) {
+		// Edit the label of the highlighted address — only meaningful when the
+		// addresses panel is focused and has a valid selection (selectedAddress
+		// returns nil for an empty tab or out-of-range cursor).
+		if m.focusedArea == focusAddr && m.selectedAddress() != nil {
 			m.openEditLabelModal()
 		}
 		return m, nil
@@ -574,10 +580,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "right", "l":
-		// Pan the addresses panel right, clamped to the widest row.
-		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.panelRowWidth()) {
+		// Pan the addresses panel right, clamped to the widest visible row.
+		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.visibleAddresses(), m.panelRowWidth()) {
 			m.addrHScroll++
 		}
+		return m, nil
+	case "1", "2", "3":
+		// Switch the addresses tab (Mine / Others / All). Reset the cursor and
+		// horizontal pan so each tab starts at the top-left, since the visible
+		// rows differ. The key digit maps directly onto the addrTab enum.
+		m.addrTab = addrTab(msg.String()[0] - '1')
+		m.addrCursor = 0
+		m.addrHScroll = 0
 		return m, nil
 	case "enter":
 		// Enter only opens the tx detail modal — pressing it while the
@@ -638,7 +652,8 @@ const pageSize = 10
 // new case here, not in every helper that scrolls.
 func (m *Model) focusedList() (*int, int) {
 	if m.focusedArea == focusAddr {
-		return &m.addrCursor, len(m.addresses)
+		// Scroll within the active tab, not the full book.
+		return &m.addrCursor, len(m.visibleAddresses())
 	}
 	return &m.txCursor, len(m.txs)
 }
@@ -815,11 +830,11 @@ func (m *Model) openSignModal() {
 	m.sign.passphrase.SetValue("")
 
 	// Pre-fill from the highlighted address when the addresses panel is
-	// focused and non-empty. Skip straight to the message step in that
+	// focused and has a selection. Skip straight to the message step in that
 	// case so the user doesn't have to press enter on a field that is
 	// already correct.
-	if m.focusedArea == focusAddr && m.addrCursor >= 0 && m.addrCursor < len(m.addresses) {
-		m.sign.address.SetValue(m.addresses[m.addrCursor].Address)
+	if sel := m.selectedAddress(); m.focusedArea == focusAddr && sel != nil {
+		m.sign.address.SetValue(sel.Address)
 		m.sign.step = signStepMessage
 		m.sign.message.Focus()
 		return
@@ -910,11 +925,14 @@ func (m Model) handleSignKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ---- Edit-label modal -------------------------------------------------
 
 // openEditLabelModal opens the edit-label modal pre-filled with the
-// highlighted address's current label, so the user edits in place. The caller
-// (handleKey "e") has already verified the addresses panel is focused and
-// addrCursor is in range.
+// highlighted address's current label, so the user edits in place. It no-ops
+// when there's no valid selection; the caller (handleKey "e") already gates on
+// that, but reading through selectedAddress keeps the modal self-guarding.
 func (m *Model) openEditLabelModal() {
-	sel := m.addresses[m.addrCursor]
+	sel := m.selectedAddress()
+	if sel == nil {
+		return
+	}
 	m.mode = modeEditLabel
 	// Reset the struct to clear any stale busy/errMsg from a previous open,
 	// keeping the configured textinput (placeholder/width).

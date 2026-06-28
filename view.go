@@ -127,7 +127,7 @@ func (m Model) View() string {
 // vertical-budget math so nothing gets pushed off screen when the terminal
 // is short. Pseudo-layout:
 //
-//     ┌────────────── header ───────────┐
+//     ┌────────────── header ──────────────┐
 //     │───────────── stats ─────────────│
 //     │─────── My Addresses (capped) ───│
 //     │─────── Transactions (stretch) ──│
@@ -139,7 +139,9 @@ func (m Model) renderDashboard() string {
 	stats := m.renderStats()
 	footer := m.renderFooter()
 
-	available := m.availableBodyHeight()
+	// Reuse the boxes we just rendered to measure the budget rather than
+	// re-rendering them inside availableBodyHeight() every frame.
+	available := m.bodyHeight(header, stats, footer)
 	addrCap := m.addrPanelHeight(available)
 	addrs := m.renderAddresses(addrCap)
 
@@ -152,12 +154,19 @@ func (m Model) renderDashboard() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, stats, addrs, txs, footer)
 }
 
-// availableBodyHeight is the vertical budget (in rows) the two scrollable
-// panels share, i.e. the terminal height minus the three fixed boxes (header,
-// stats, footer). Both renderDashboard and the +/- resize key handler read it
-// so the divider math has a single source of truth.
+// bodyHeight is the vertical budget (in rows) the two scrollable panels share:
+// the terminal height minus the three fixed boxes. It takes the already-rendered
+// boxes so the only caller with them in hand (renderDashboard) doesn't re-render
+// to measure.
+func (m Model) bodyHeight(header, stats, footer string) int {
+	return m.height - lipgloss.Height(header) - lipgloss.Height(stats) - lipgloss.Height(footer)
+}
+
+// availableBodyHeight is bodyHeight for callers that don't already have the
+// fixed boxes rendered — the +/- resize key handlers — so they render-and-
+// measure on demand. The divider math stays a single source of truth.
 func (m Model) availableBodyHeight() int {
-	return m.height - lipgloss.Height(m.renderHeader()) - lipgloss.Height(m.renderStats()) - lipgloss.Height(m.renderFooter())
+	return m.bodyHeight(m.renderHeader(), m.renderStats(), m.renderFooter())
 }
 
 // addrPanelHeight is the effective height of the My Addresses panel for the
@@ -178,23 +187,13 @@ func (m Model) addrPanelHeight(available int) int {
 	return m.clampPanelRows(rows, available)
 }
 
-// addrPanelMaxRows is the largest useful height for the My Addresses panel. It
-// is bounded below by leaving Transactions its 3-row floor (available-3), and
-// above by the panel's own content: the box only grows to fit its rows, so past
-// len(addresses)+3 (data + title + two borders) the panel stays visually static
-// while a raw resize counter would keep climbing — and you'd then have to wind
-// that invisible slack back down before the opposite key moved anything. Floored
-// at 3 for very short terminals.
+// addrPanelMaxRows is the largest height the My Addresses panel may be resized
+// to: enough to leave Transactions its 3-row floor (available-3), floored at 3
+// itself for very short terminals. A manually-resized panel fills its height
+// with blank rows (see renderAddresses), so the ceiling no longer depends on
+// how many addresses the active tab happens to show.
 func (m Model) addrPanelMaxRows(available int) int {
 	max := available - 3
-	content := len(m.addresses)
-	if content < 1 {
-		content = 1 // loading / error / empty states render a single line
-	}
-	content += 3 // title + two borders
-	if content < max {
-		max = content
-	}
 	if max < 3 {
 		max = 3
 	}
@@ -378,10 +377,11 @@ func (m Model) panelRowWidth() int {
 // addrMaxScroll is the furthest right the address panel can pan: the widest
 // row's column count minus the visible row width (never negative). Returns 0
 // when every row already fits, which also doubles as "scrolling is pointless"
-// for the ←/→ hint.
-func (m Model) addrMaxScroll(rowWidth int) int {
+// for the ←/→ hint. Takes the slice it should measure (the visible tab) so the
+// pan range tracks whatever the panel is currently showing.
+func (m Model) addrMaxScroll(addrs []ReceivedAddress, rowWidth int) int {
 	widest := 0
-	for _, a := range m.addresses {
+	for _, a := range addrs {
 		if w := segmentsWidth(addressRowSegments(a, m.anonymous, m.ownership(a.Address))); w > widest {
 			widest = w
 		}
@@ -392,16 +392,46 @@ func (m Model) addrMaxScroll(rowWidth int) int {
 	return 0
 }
 
+// renderAddrTabs builds the Mine | Others | All tab bar shown as the panel's
+// header line. Each segment is prefixed with its 1/2/3 hotkey so the binding is
+// self-documenting (e.g. "1.Mine 12"). The active tab is bracketed and
+// accented; inactive tabs are muted and padded with spaces so the bar's width
+// doesn't jump when the selection moves. Counts come from addrTabCounts.
+func (m Model) renderAddrTabs() string {
+	mine, others, all := m.addrTabCounts()
+	seg := func(tab addrTab, key, label string, n int) string {
+		text := fmt.Sprintf("%s.%s (%d)", key, label, n)
+		if m.addrTab == tab {
+			return styleAccent.Render("[" + text + "]")
+		}
+		return styleMuted.Render(" " + text + " ")
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		seg(addrTabMine, "1", "Mine", mine), " ",
+		seg(addrTabOthers, "2", "Others", others), " ",
+		seg(addrTabAll, "3", "All", all),
+	)
+}
+
 // renderAddresses draws the scrollable My Addresses panel. Like
 // renderTxList, it derives the visible window from the cursor each
 // frame. The panel renders a focus indicator (accent border + ▸ on the
-// selected row) only when m.focusedArea == focusAddr.
+// selected row) only when m.focusedArea == focusAddr. Rows are drawn from the
+// active tab's slice (see visibleAddresses), with the tab bar as the header.
 func (m Model) renderAddresses(maxHeight int) string {
 	border := styleBorder
 	if m.focusedArea == focusAddr {
 		border = styleBorderFocused
 	}
 	box := border.Width(m.width - 2)
+	// Once the user has manually resized the panel, hold that height and pad
+	// with blank rows (same as the Transactions box) so it stays a consistent
+	// size when switching tabs instead of snapping to each tab's row count. In
+	// auto mode we leave the box content-sized so a near-empty panel yields its
+	// slack to Transactions.
+	if m.addrPanelRows > 0 {
+		box = box.Height(maxHeight - 2)
+	}
 
 	title := "My Addresses"
 	if !m.addrsLoaded {
@@ -414,7 +444,14 @@ func (m Model) renderAddresses(maxHeight int) string {
 		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("wallet has no addresses yet, run `getnewaddress`"))
 	}
 
-	// Available data rows inside the box: maxHeight - 2 (borders) - 1 (title row).
+	// The tab bar is always rendered, even when the active tab is empty, so the
+	// user can switch away from a tab that filtered everything out.
+	visible := m.visibleAddresses()
+	if len(visible) == 0 {
+		return box.Render(m.renderAddrTabs() + "\n" + styleMuted.Render("no addresses in this tab"))
+	}
+
+	// Available data rows inside the box: maxHeight - 2 (borders) - 1 (tab bar).
 	maxRows := maxHeight - 3
 	if maxRows < 1 {
 		maxRows = 1
@@ -427,34 +464,34 @@ func (m Model) renderAddresses(maxHeight int) string {
 	}
 
 	rowWidth := m.panelRowWidth()
-	// maxScroll walks every row, so compute it once and reuse it for both the
-	// clamp and the ←/→ hint below.
-	maxScroll := m.addrMaxScroll(rowWidth)
+	// maxScroll walks the visible rows, so compute it once and reuse it for both
+	// the clamp and the ←/→ hint below.
+	maxScroll := m.addrMaxScroll(visible, rowWidth)
 	// Clamp the horizontal scroll so it can't pan past the longest row.
 	hoff := m.addrHScroll
 	if hoff > maxScroll {
 		hoff = maxScroll
 	}
 
-	// Title carries the total count plus a "cursor/total" indicator when
-	// the list is longer than the window, and a ←/→ hint once a row is wide
-	// enough to scroll and the panel is focused.
-	header := fmt.Sprintf("My Addresses (%d)", len(m.addresses))
-	if len(m.addresses) > maxRows {
-		header += fmt.Sprintf("  %d/%d", m.addrCursor+1, len(m.addresses))
+	// Header: tab bar, plus a "cursor/total" indicator when the list is longer
+	// than the window, and a ←/→ hint once a row is wide enough to scroll and
+	// the panel is focused.
+	header := m.renderAddrTabs()
+	if len(visible) > maxRows {
+		header += styleMuted.Render(fmt.Sprintf("  %d/%d", m.addrCursor+1, len(visible)))
 	}
 	if m.focusedArea == focusAddr && maxScroll > 0 {
 		header += styleMuted.Render("  ←/→")
 	}
-	lines := []string{styleTitle.Render(header)}
+	lines := []string{header}
 
 	end := offset + maxRows
-	if end > len(m.addresses) {
-		end = len(m.addresses)
+	if end > len(visible) {
+		end = len(visible)
 	}
 	for i := offset; i < end; i++ {
 		prefix := "  "
-		row := clipSegments(addressRowSegments(m.addresses[i], m.anonymous, m.ownership(m.addresses[i].Address)), hoff, rowWidth)
+		row := clipSegments(addressRowSegments(visible[i], m.anonymous, m.ownership(visible[i].Address)), hoff, rowWidth)
 		if i == m.addrCursor && m.focusedArea == focusAddr {
 			// Carry the highlight background through the cursor marker and
 			// across the whole row, so it's coloured edge to edge.
@@ -728,7 +765,8 @@ func (m Model) renderFooter() string {
 	}
 	keys := []string{"[s]end", "sign [m]sg"}
 	// [e]dit label only acts on the focused addresses panel, so surface it
-	// contextually rather than implying it works everywhere.
+	// contextually rather than implying it works everywhere. (The 1/2/3 tab
+	// keys are self-documented in the panel's own tab bar.)
 	if m.focusedArea == focusAddr {
 		keys = append(keys, "[e]dit label")
 	}

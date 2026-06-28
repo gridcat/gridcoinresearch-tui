@@ -43,6 +43,17 @@ const (
 	focusAddr                // My Addresses panel
 )
 
+// addrTab identifies which ownership filter the My Addresses panel is showing.
+// The user switches between them with the 1/2/3 keys. The zero value is
+// addrTabMine, so the panel defaults to the user's own addresses.
+type addrTab int
+
+const (
+	addrTabMine   addrTab = iota // own + not-yet-resolved addresses (default)
+	addrTabOthers                // foreign addresses (labelled send targets)
+	addrTabAll                   // the full address book
+)
+
 // configField is a type-safe enum for rows in the config modal. iota gives
 // each constant a unique integer starting from 0, so they can be compared
 // and used as array indices.
@@ -265,6 +276,10 @@ type Model struct {
 	// computed default (see addrPanelHeight). Session-only; never persisted.
 	addrPanelRows int
 
+	// addrTab is the ownership filter the My Addresses panel currently shows,
+	// switched with the 1/2/3 keys. See visibleAddresses.
+	addrTab addrTab
+
 	// anonymous hides monetary amounts on screen. Toggled at runtime via
 	// the "a" hotkey so the user can safely show the dashboard in public.
 	anonymous bool
@@ -374,6 +389,54 @@ func (m Model) unknownOwnership() []string {
 		}
 	}
 	return out
+}
+
+// visibleAddresses returns the addresses the panel should show under the active
+// tab. The partition is gap-free (Mine ∪ Others = All): Mine keeps everything
+// that isn't known-foreign — i.e. owned plus not-yet-resolved — so freshly
+// loaded rows appear immediately and only drop out if validateaddress later
+// flags them foreign. Others keeps exactly the foreign ones. All returns the
+// full slice untouched. Every cursor / scroll / sign / edit path reads this so
+// the filter lives in one place.
+func (m Model) visibleAddresses() []ReceivedAddress {
+	if m.addrTab == addrTabAll {
+		return m.addresses
+	}
+	wantForeign := m.addrTab == addrTabOthers // else addrTabMine: keep non-foreign
+	var out []ReceivedAddress
+	for _, a := range m.addresses {
+		if (m.ownership(a.Address) == ownForeign) == wantForeign {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// selectedAddress returns the address highlighted in the My Addresses panel —
+// the addrCursor row of the active tab — or nil when the tab is empty or the
+// cursor is somehow out of range. Centralizing the cursor-into-filtered-list
+// bounds check here means callers (the edit/sign entry points) don't each
+// re-derive visibleAddresses() and re-apply the same guard.
+func (m Model) selectedAddress() *ReceivedAddress {
+	visible := m.visibleAddresses()
+	if m.addrCursor < 0 || m.addrCursor >= len(visible) {
+		return nil
+	}
+	return &visible[m.addrCursor]
+}
+
+// addrTabCounts returns the per-tab entry counts for the tab bar. others counts
+// the known-foreign addresses; mine is everything else (own + unknown), which
+// matches the visibleAddresses partition.
+func (m Model) addrTabCounts() (mine, others, all int) {
+	all = len(m.addresses)
+	for _, a := range m.addresses {
+		if m.ownership(a.Address) == ownForeign {
+			others++
+		}
+	}
+	mine = all - others
+	return
 }
 
 // newConfigState builds a fresh configState pre-populated with the values
