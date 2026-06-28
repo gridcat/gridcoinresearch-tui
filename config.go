@@ -69,23 +69,23 @@ func LoadConfig(args []string) (Config, error) {
 	// We build a fresh FlagSet instead of using the package-level flag.Parse
 	// so tests can call LoadConfig with synthetic argv without interfering
 	// with the global flag state.
-	fs := flag.NewFlagSet("gridcoinresearch-tui", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	flags := flag.NewFlagSet("gridcoinresearch-tui", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
 
-	// Each fs.String/fs.Bool returns a pointer. Dereferencing it later with
+	// Each flags.String/flags.Bool returns a pointer. Dereferencing it later with
 	// *testnet / *hostFlag gives the value the user supplied (or the default).
 	var (
-		testnet     = fs.Bool("testnet", false, "use testnet conf path + default port")
-		mainnet     = fs.Bool("mainnet", false, "use mainnet (default)")
-		hostFlag    = fs.String("rpc-host", "", "RPC host (default 127.0.0.1)")
-		portFlag    = fs.String("rpc-port", "", "RPC port (default 15715 mainnet / 25715 testnet)")
-		userFlag    = fs.String("rpc-user", "", "RPC username (optional)")
-		passFlag    = fs.String("rpc-password", "", "RPC password (optional; prefer GRC_RPC_PASSWORD env var)")
-		confFlag    = fs.String("conf", "", "path to gridcoinresearch.conf (optional)")
-		refreshFlag = fs.Duration("refresh", defaultRefresh, "refresh interval")
+		testnet     = flags.Bool("testnet", false, "use testnet conf path + default port")
+		mainnet     = flags.Bool("mainnet", false, "use mainnet (default)")
+		hostFlag    = flags.String("rpc-host", "", "RPC host (default 127.0.0.1)")
+		portFlag    = flags.String("rpc-port", "", "RPC port (default 15715 mainnet / 25715 testnet)")
+		userFlag    = flags.String("rpc-user", "", "RPC username (optional)")
+		passFlag    = flags.String("rpc-password", "", "RPC password (optional; prefer GRC_RPC_PASSWORD env var)")
+		confFlag    = flags.String("conf", "", "path to gridcoinresearch.conf (optional)")
+		refreshFlag = flags.Duration("refresh", defaultRefresh, "refresh interval")
 	)
 
-	if err := fs.Parse(args); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return Config{}, err
 	}
 
