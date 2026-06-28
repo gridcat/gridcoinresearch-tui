@@ -163,8 +163,8 @@ func (m Model) bodyHeight(header, stats, footer string) int {
 }
 
 // availableBodyHeight is bodyHeight for callers that don't already have the
-// fixed boxes rendered — the +/- resize key handlers — so they render-and-
-// measure on demand. The divider math stays a single source of truth.
+// fixed boxes rendered (the +/- resize key handlers), so they render and
+// measure on demand. The divider math stays in one place.
 func (m Model) availableBodyHeight() int {
 	return m.bodyHeight(m.renderHeader(), m.renderStats(), m.renderFooter())
 }

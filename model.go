@@ -393,11 +393,11 @@ func (m Model) unknownOwnership() []string {
 
 // visibleAddresses returns the addresses the panel should show under the active
 // tab. The partition is gap-free (Mine ∪ Others = All): Mine keeps everything
-// that isn't known-foreign — i.e. owned plus not-yet-resolved — so freshly
-// loaded rows appear immediately and only drop out if validateaddress later
-// flags them foreign. Others keeps exactly the foreign ones. All returns the
-// full slice untouched. Every cursor / scroll / sign / edit path reads this so
-// the filter lives in one place.
+// that isn't known-foreign (owned, or not yet resolved), so freshly loaded rows
+// appear immediately and only drop out if validateaddress later flags them
+// foreign. Others keeps exactly the foreign ones. All returns the full slice
+// untouched. The cursor, scroll, sign, and edit paths all read this, so the
+// filter lives in one place.
 func (m Model) visibleAddresses() []ReceivedAddress {
 	if m.addrTab == addrTabAll {
 		return m.addresses

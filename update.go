@@ -241,7 +241,7 @@ func (m *Model) refreshAllCmd() tea.Cmd {
 }
 
 // refreshCoreCmd is the serialised 4-fetch batch used on every timer
-// tick. Same rationale as refreshAllCmd — see its comment — but we
+// tick. Same rationale as refreshAllCmd (see its comment), but we
 // deliberately omit fetchAddrs here because ticks are supposed to be
 // lightweight; addresses refresh event-driven from the txsMsg handler
 // when a genuinely new tx is detected.
@@ -706,7 +706,7 @@ func (m *Model) openSendModal() {
 	m.send.address.Focus()
 }
 
-// handleSendKey is the send-wizard's input handler. It acts as a small
+// handleSendKey is the send-wizard's input handler. It is a small
 // state machine: the current m.send.step decides which keys do what.
 func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
