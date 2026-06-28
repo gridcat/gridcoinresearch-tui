@@ -598,6 +598,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgdown", "ctrl+d":
 		m.scrollBy(pageSize)
 		return m, nil
+	case "+", "=":
+		// Grow the addresses panel (push the divider down). Seed from the
+		// current effective height so the first press never jumps, and clamp
+		// so Transactions keeps its 3-row minimum.
+		available := m.availableBodyHeight()
+		m.addrPanelRows = m.clampPanelRows(m.addrPanelHeight(available)+1, available)
+		return m, nil
+	case "-":
+		// Shrink the addresses panel (push the divider up), floored at 3 rows.
+		available := m.availableBodyHeight()
+		m.addrPanelRows = m.clampPanelRows(m.addrPanelHeight(available)-1, available)
+		return m, nil
+	case "0":
+		// Snap the split back to the auto-computed default.
+		m.addrPanelRows = 0
+		return m, nil
 	case "g", "home":
 		m.scrollTo(0)
 		return m, nil

@@ -260,6 +260,11 @@ type Model struct {
 	// focus leaves the panel so re-entering always starts at the left edge.
 	addrHScroll int
 
+	// addrPanelRows is the user's chosen height (in rows) for the My Addresses
+	// panel, set by the +/-/0 resize keys. 0 means "auto" — fall back to the
+	// computed default (see addrPanelHeight). Session-only; never persisted.
+	addrPanelRows int
+
 	// anonymous hides monetary amounts on screen. Toggled at runtime via
 	// the "a" hotkey so the user can safely show the dashboard in public.
 	anonymous bool
