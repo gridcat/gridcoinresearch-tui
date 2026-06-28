@@ -2,19 +2,19 @@
 // the terminal. Every frame of the TUI is produced by View() calling one of
 // the render* helpers below. Keep in mind:
 //
-//   • View is a value receiver, it is pure, it cannot mutate state, and
+//   - View is a value receiver, it is pure, it cannot mutate state, and
 //     Bubble Tea is free to call it as often as it likes.
 //
-//   • We use lipgloss for styling. A lipgloss.Style is a reusable config:
+//   - We use lipgloss for styling. A lipgloss.Style is a reusable config:
 //     .Foreground(color), .Bold(true), .Width(n), .Border(…), .Padding(…),
 //     then .Render(string) to get the final ANSI-coloured text.
 //
-//   • lipgloss.JoinHorizontal / JoinVertical place already-rendered blocks
+//   - lipgloss.JoinHorizontal / JoinVertical place already-rendered blocks
 //     next to each other, they measure the blocks, align them, and return
 //     a new string. No layout engine, just string concatenation with width
 //     awareness.
 //
-//   • All styles that are used on the per-render hot path (every row of
+//   - All styles that are used on the per-render hot path (every row of
 //     the tx list, for example) are defined once at package level so we
 //     don't allocate a fresh Style struct on each frame.
 package main
@@ -32,16 +32,16 @@ import (
 // decimal string, and the terminal renders it via ANSI SGR. Where the
 // terminal doesn't support colour, lipgloss strips the escape sequences.
 var (
-	colorBorder  = lipgloss.Color("240")
-	colorMuted   = lipgloss.Color("244")
-	colorLabel   = lipgloss.Color("250")
-	colorValue   = lipgloss.Color("255")
-	colorGood    = lipgloss.Color("42")  // green
-	colorWarn    = lipgloss.Color("214") // orange
-	colorBad     = lipgloss.Color("203") // red
-	colorMainnet = lipgloss.Color("42")
-	colorTestnet = lipgloss.Color("214")
-	colorAccent  = lipgloss.Color("75")
+	colorBorder      = lipgloss.Color("240")
+	colorMuted       = lipgloss.Color("244")
+	colorLabel       = lipgloss.Color("250")
+	colorValue       = lipgloss.Color("255")
+	colorGood        = lipgloss.Color("42")  // green
+	colorWarn        = lipgloss.Color("214") // orange
+	colorBad         = lipgloss.Color("203") // red
+	colorMainnet     = lipgloss.Color("42")
+	colorTestnet     = lipgloss.Color("214")
+	colorAccent      = lipgloss.Color("75")
 	colorRowSelected = lipgloss.Color("236") // highlight background for the selected row
 
 	// styleBorder is the rounded-corner box used for every panel on the
@@ -119,6 +119,8 @@ func (m Model) View() string {
 		return m.renderTxDetailModal()
 	case modeEditLabel:
 		return m.renderEditLabelModal()
+	case modeHelp:
+		return m.renderHelpModal()
 	}
 	return m.renderDashboard()
 }
@@ -127,11 +129,11 @@ func (m Model) View() string {
 // vertical-budget math so nothing gets pushed off screen when the terminal
 // is short. Pseudo-layout:
 //
-//     ┌────────────── header ──────────────┐
-//     │───────────── stats ─────────────│
-//     │─────── My Addresses (capped) ───│
-//     │─────── Transactions (stretch) ──│
-//     │───────────── footer ────────────│
+//	┌────────────── header ───────────┐
+//	│───────────── stats ─────────────│
+//	│─────── My Addresses (capped) ───│
+//	│─────── Transactions (stretch) ──│
+//	│───────────── footer ────────────│
 //
 // Transactions get priority; addresses are capped to min(available/3, 8).
 func (m Model) renderDashboard() string {
@@ -139,19 +141,10 @@ func (m Model) renderDashboard() string {
 	stats := m.renderStats()
 	footer := m.renderFooter()
 
-	// Transactions are the primary working area: they get the lion's share
-	// of the vertical budget. Addresses are a reference panel, capped at a
-	// third of what's left after the fixed rows, with an absolute ceiling so
-	// very tall terminals don't waste space on them either.
-	available := m.height - lipgloss.Height(header) - lipgloss.Height(stats) - lipgloss.Height(footer)
-	const addrAbsoluteMax = 8
-	addrCap := available / 3
-	if addrCap > addrAbsoluteMax {
-		addrCap = addrAbsoluteMax
-	}
-	if addrCap < 3 {
-		addrCap = 3
-	}
+	// Reuse the boxes we just rendered to measure the budget rather than
+	// re-rendering them inside availableBodyHeight() every frame.
+	available := m.bodyHeight(header, stats, footer)
+	addrCap := m.addrPanelHeight(available)
 	addrs := m.renderAddresses(addrCap)
 
 	txHeight := available - lipgloss.Height(addrs)
@@ -161,6 +154,66 @@ func (m Model) renderDashboard() string {
 	txs := m.renderTxList(txHeight)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, stats, addrs, txs, footer)
+}
+
+// bodyHeight is the vertical budget (in rows) the two scrollable panels share:
+// the terminal height minus the three fixed boxes. It takes the already-rendered
+// boxes so the only caller with them in hand (renderDashboard) doesn't re-render
+// to measure.
+func (m Model) bodyHeight(header, stats, footer string) int {
+	return m.height - lipgloss.Height(header) - lipgloss.Height(stats) - lipgloss.Height(footer)
+}
+
+// availableBodyHeight is bodyHeight for callers that don't already have the
+// fixed boxes rendered (the +/- resize key handlers), so they render and
+// measure on demand. The divider math stays in one place.
+func (m Model) availableBodyHeight() int {
+	return m.bodyHeight(m.renderHeader(), m.renderStats(), m.renderFooter())
+}
+
+// addrPanelHeight is the effective height of the My Addresses panel for the
+// given body budget. Without a user override it auto-sizes the same way the
+// dashboard always has: a third of the budget, capped at 8 rows so tall
+// terminals don't waste space. A non-zero addrPanelRows (set by the resize
+// keys) replaces that default. Either way the result is clamped so addresses
+// keeps at least 3 rows and Transactions keeps its own 3-row minimum.
+func (m Model) addrPanelHeight(available int) int {
+	const addrAbsoluteMax = 8
+	rows := available / 3
+	if rows > addrAbsoluteMax {
+		rows = addrAbsoluteMax
+	}
+	if m.addrPanelRows > 0 {
+		rows = m.addrPanelRows
+	}
+	return m.clampPanelRows(rows, available)
+}
+
+// addrPanelMaxRows is the largest height the My Addresses panel may be resized
+// to: enough to leave Transactions its 3-row floor (available-3), floored at 3
+// itself for very short terminals. A manually-resized panel fills its height
+// with blank rows (see renderAddresses), so the ceiling no longer depends on
+// how many addresses the active tab happens to show.
+func (m Model) addrPanelMaxRows(available int) int {
+	max := available - 3
+	if max < 3 {
+		max = 3
+	}
+	return max
+}
+
+// clampPanelRows pins an address-panel height to [3, addrPanelMaxRows] so
+// neither panel drops below its 3-row floor and the resize counter never runs
+// past what the panel can actually show.
+func (m Model) clampPanelRows(rows, available int) int {
+	max := m.addrPanelMaxRows(available)
+	if rows < 3 {
+		return 3
+	}
+	if rows > max {
+		return max
+	}
+	return rows
 }
 
 // renderHeader draws the top bar: program name on the left, network badge
@@ -326,11 +379,12 @@ func (m Model) panelRowWidth() int {
 // addrMaxScroll is the furthest right the address panel can pan: the widest
 // row's column count minus the visible row width (never negative). Returns 0
 // when every row already fits, which also doubles as "scrolling is pointless"
-// for the ←/→ hint.
-func (m Model) addrMaxScroll(rowWidth int) int {
+// for the ←/→ hint. Takes the slice it should measure (the visible tab) so the
+// pan range tracks whatever the panel is currently showing.
+func (m Model) addrMaxScroll(addrs []ReceivedAddress, rowWidth int) int {
 	widest := 0
-	for _, a := range m.addresses {
-		if w := segmentsWidth(addressRowSegments(a, m.anonymous)); w > widest {
+	for _, a := range addrs {
+		if w := segmentsWidth(addressRowSegments(a, m.anonymous, m.ownership(a.Address))); w > widest {
 			widest = w
 		}
 	}
@@ -340,16 +394,46 @@ func (m Model) addrMaxScroll(rowWidth int) int {
 	return 0
 }
 
+// renderAddrTabs builds the Mine | Others | All tab bar shown as the panel's
+// header line. Each segment is prefixed with its 1/2/3 hotkey so the binding is
+// self-documenting (e.g. "1.Mine 12"). The active tab is bracketed and
+// accented; inactive tabs are muted and padded with spaces so the bar's width
+// doesn't jump when the selection moves. Counts come from addrTabCounts.
+func (m Model) renderAddrTabs() string {
+	mine, others, all := m.addrTabCounts()
+	seg := func(tab addrTab, key, label string, n int) string {
+		text := fmt.Sprintf("%s.%s (%d)", key, label, n)
+		if m.addrTab == tab {
+			return styleAccent.Render("[" + text + "]")
+		}
+		return styleMuted.Render(" " + text + " ")
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		seg(addrTabMine, "1", "Mine", mine), " ",
+		seg(addrTabOthers, "2", "Others", others), " ",
+		seg(addrTabAll, "3", "All", all),
+	)
+}
+
 // renderAddresses draws the scrollable My Addresses panel. Like
 // renderTxList, it derives the visible window from the cursor each
 // frame. The panel renders a focus indicator (accent border + ▸ on the
-// selected row) only when m.focusedArea == focusAddr.
+// selected row) only when m.focusedArea == focusAddr. Rows are drawn from the
+// active tab's slice (see visibleAddresses), with the tab bar as the header.
 func (m Model) renderAddresses(maxHeight int) string {
 	border := styleBorder
 	if m.focusedArea == focusAddr {
 		border = styleBorderFocused
 	}
 	box := border.Width(m.width - 2)
+	// Once the user has manually resized the panel, hold that height and pad
+	// with blank rows (same as the Transactions box) so it stays a consistent
+	// size when switching tabs instead of snapping to each tab's row count. In
+	// auto mode we leave the box content-sized so a near-empty panel yields its
+	// slack to Transactions.
+	if m.addrPanelRows > 0 {
+		box = box.Height(maxHeight - 2)
+	}
 
 	title := "My Addresses"
 	if !m.addrsLoaded {
@@ -362,7 +446,14 @@ func (m Model) renderAddresses(maxHeight int) string {
 		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("wallet has no addresses yet, run `getnewaddress`"))
 	}
 
-	// Available data rows inside the box: maxHeight - 2 (borders) - 1 (title row).
+	// The tab bar is always rendered, even when the active tab is empty, so the
+	// user can switch away from a tab that filtered everything out.
+	visible := m.visibleAddresses()
+	if len(visible) == 0 {
+		return box.Render(m.renderAddrTabs() + "\n" + styleMuted.Render("no addresses in this tab"))
+	}
+
+	// Available data rows inside the box: maxHeight - 2 (borders) - 1 (tab bar).
 	maxRows := maxHeight - 3
 	if maxRows < 1 {
 		maxRows = 1
@@ -375,34 +466,34 @@ func (m Model) renderAddresses(maxHeight int) string {
 	}
 
 	rowWidth := m.panelRowWidth()
-	// maxScroll walks every row, so compute it once and reuse it for both the
-	// clamp and the ←/→ hint below.
-	maxScroll := m.addrMaxScroll(rowWidth)
+	// maxScroll walks the visible rows, so compute it once and reuse it for both
+	// the clamp and the ←/→ hint below.
+	maxScroll := m.addrMaxScroll(visible, rowWidth)
 	// Clamp the horizontal scroll so it can't pan past the longest row.
 	hoff := m.addrHScroll
 	if hoff > maxScroll {
 		hoff = maxScroll
 	}
 
-	// Title carries the total count plus a "cursor/total" indicator when
-	// the list is longer than the window, and a ←/→ hint once a row is wide
-	// enough to scroll and the panel is focused.
-	header := fmt.Sprintf("My Addresses (%d)", len(m.addresses))
-	if len(m.addresses) > maxRows {
-		header += fmt.Sprintf("  %d/%d", m.addrCursor+1, len(m.addresses))
+	// Header: tab bar, plus a "cursor/total" indicator when the list is longer
+	// than the window, and a ←/→ hint once a row is wide enough to scroll and
+	// the panel is focused.
+	header := m.renderAddrTabs()
+	if len(visible) > maxRows {
+		header += styleMuted.Render(fmt.Sprintf("  %d/%d", m.addrCursor+1, len(visible)))
 	}
 	if m.focusedArea == focusAddr && maxScroll > 0 {
 		header += styleMuted.Render("  ←/→")
 	}
-	lines := []string{styleTitle.Render(header)}
+	lines := []string{header}
 
 	end := offset + maxRows
-	if end > len(m.addresses) {
-		end = len(m.addresses)
+	if end > len(visible) {
+		end = len(visible)
 	}
 	for i := offset; i < end; i++ {
 		prefix := "  "
-		row := clipSegments(addressRowSegments(m.addresses[i], m.anonymous), hoff, rowWidth)
+		row := clipSegments(addressRowSegments(visible[i], m.anonymous, m.ownership(visible[i].Address)), hoff, rowWidth)
 		if i == m.addrCursor && m.focusedArea == focusAddr {
 			// Carry the highlight background through the cursor marker and
 			// across the whole row, so it's coloured edge to edge.
@@ -427,9 +518,15 @@ type styledSeg struct {
 // addressRowSegments builds the coloured runs for one address: the address
 // itself, then optional watch-only flag, label, and received amount, each
 // separated by a two-space gap.
-func addressRowSegments(a ReceivedAddress, anonymous bool) []styledSeg {
+func addressRowSegments(a ReceivedAddress, anonymous bool, own addrOwnership) []styledSeg {
 	segs := []styledSeg{{a.Address, styleValue}}
 	gap := styledSeg{"  ", styleMuted}
+	if own == ownForeign {
+		// listreceivedbyaddress includes addresses you've only labelled but
+		// don't own; flag them in red (a stronger cue than watch-only's
+		// orange) so a foreign address is never mistaken for one of yours.
+		segs = append(segs, gap, styledSeg{"⚠ not yours", styleBad})
+	}
 	if a.InvolvesWatchonly {
 		// The eye glyph hints at the meaning visually; the trailing word
 		// makes it explicit on terminals that fall back to a tofu box.
@@ -569,10 +666,10 @@ func sliceByCols(text string, lo, hi int) string {
 // renderTxList draws the scrollable transactions panel, sized to fill the
 // vertical space that renderDashboard handed it. Scroll math:
 //
-//   txCursor: index of the currently selected tx in m.txs
-//   offset: index of the tx shown at the top of the visible window
-//               (derived fresh every frame from cursor + maxRows)
-//   maxRows: how many data rows fit inside the box this frame
+//	txCursor: index of the currently selected tx in m.txs
+//	offset: index of the tx shown at the top of the visible window
+//	            (derived fresh every frame from cursor + maxRows)
+//	maxRows: how many data rows fit inside the box this frame
 //
 // We slide offset just enough to keep the cursor in view.
 func (m Model) renderTxList(height int) string {
@@ -668,9 +765,10 @@ func (m Model) renderFooter() string {
 	if m.anonymous {
 		anonLabel = "[a]non ●"
 	}
-	keys := []string{"[s]end", "sign [m]sg"}
+	keys := []string{"[?]help", "[s]end", "sign [m]sg"}
 	// [e]dit label only acts on the focused addresses panel, so surface it
-	// contextually rather than implying it works everywhere.
+	// contextually rather than implying it works everywhere. (The 1/2/3 tab
+	// keys are self-documented in the panel's own tab bar.)
 	if m.focusedArea == focusAddr {
 		keys = append(keys, "[e]dit label")
 	}
@@ -680,6 +778,7 @@ func (m Model) renderFooter() string {
 		anonLabel,
 		"[tab] switch panel",
 		"[↑/↓ · pgup/pgdn] scroll",
+		"[+/-] resize",
 		"[q]uit",
 	)
 	left := styleMuted.Render(strings.Join(keys, "  "))
@@ -852,6 +951,12 @@ func (m Model) renderEditLabelModal() string {
 		styleLabel.Render("Address: ") + styleAccent.Render(m.edit.address)
 
 	body := "Label:\n\n" + m.edit.label.View()
+	// Heads-up for the setaccount quirk (see runSetLabel): relabeling an
+	// address that is its account's current receiving address makes
+	// gridcoinresearchd spawn a replacement carrying the old label. We can't
+	// suppress it (setaccount is the only label RPC Gridcoin exposes), so we
+	// warn rather than surprise. The modal's Width wraps this for us.
+	body += "\n\n" + styleMuted.Render("Heads-up: the daemon may spawn an extra address with the old label on save. harmless quirk, coins unaffected.")
 	if m.edit.errMsg != "" {
 		body += "\n\n" + styleBad.Render(m.edit.errMsg)
 	} else {
@@ -967,6 +1072,63 @@ func (m Model) renderTxDetailModal() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
+// renderHelpModal is the read-only cheat sheet opened with "?". It lists every
+// key grouped by what it does, with a short plain-language note on each, plus a
+// one-line summary of what the dashboard is. Any key closes it (handled in
+// update.go::handleKey, case modeHelp).
+func (m Model) renderHelpModal() string {
+	// keyRow renders one "keys → what they do" line: the keys in the accent
+	// colour in a fixed-width column so the descriptions line up.
+	keyRow := func(keys, desc string) string {
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			styleAccent.Width(12).Render(keys),
+			styleLabel.Render(desc),
+		)
+	}
+
+	lines := []string{
+		styleTitle.Render("Help"),
+		styleMuted.Render("A read-only view of a running Gridcoin wallet: balance, staking,"),
+		styleMuted.Render("lock, block height, your addresses, and recent transactions."),
+		styleMuted.Render("You can also send coins, sign a message, or relabel an address."),
+		"",
+		styleTitle.Render("Move around"),
+		keyRow("↑ ↓  k j", "Move the cursor in the focused panel"),
+		keyRow("PgUp PgDn", "Jump a page (also Ctrl+U / Ctrl+D)"),
+		keyRow("g G", "First / last row (also Home / End)"),
+		keyRow("Tab", "Switch focus between the two panels"),
+		keyRow("← →  h l", "Slide a too-wide address row sideways"),
+		"",
+		styleTitle.Render("My Addresses"),
+		keyRow("1 2 3", "Show Mine, Others, or All addresses"),
+		keyRow("+ −", "Grow or shrink the panel; 0 resets it"),
+		keyRow("e", "Rename the selected address (blank clears it)"),
+		"",
+		styleTitle.Render("Do things"),
+		keyRow("Enter", "Open the selected transaction in full"),
+		keyRow("s", "Send GRC (checks the address, unlocks only if needed)"),
+		keyRow("m", "Sign a message with one of your addresses"),
+		keyRow("c", "Change host, port, login, or refresh for this session"),
+		keyRow("a", "Hide every amount on screen, handy when sharing"),
+		keyRow("r", "Refresh now instead of waiting for the next poll"),
+		keyRow("? q", "This help; q quits (also Ctrl+C)"),
+		"",
+		styleMuted.Render("press any key to close"),
+	}
+
+	modalWidth := 66
+	if max := m.width - 4; modalWidth > max && max > 0 {
+		modalWidth = max
+	}
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(modalWidth).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
 func (m Model) renderConfigModal() string {
 	row := func(label string, field configField, value string) string {
 		prefix := "  "
@@ -1048,4 +1210,3 @@ func (m Model) renderConfigModal() string {
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
-

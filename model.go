@@ -31,6 +31,7 @@ const (
 	modeConfig                    // the runtime config editor modal
 	modeTxDetail                  // a modal showing one transaction in detail
 	modeEditLabel                 // the "edit address label" modal
+	modeHelp                      // the keybinding / capability cheat sheet
 )
 
 // focusArea identifies which scrollable list on the dashboard is "active"
@@ -41,6 +42,17 @@ type focusArea int
 const (
 	focusTx focusArea = iota // transactions panel (default)
 	focusAddr                // My Addresses panel
+)
+
+// addrTab identifies which ownership filter the My Addresses panel is showing.
+// The user switches between them with the 1/2/3 keys. The zero value is
+// addrTabMine, so the panel defaults to the user's own addresses.
+type addrTab int
+
+const (
+	addrTabMine   addrTab = iota // own + not-yet-resolved addresses (default)
+	addrTabOthers                // foreign addresses (labelled send targets)
+	addrTabAll                   // the full address book
 )
 
 // configField is a type-safe enum for rows in the config modal. iota gives
@@ -208,6 +220,12 @@ type Model struct {
 	txs        []Transaction
 	addresses  []ReceivedAddress
 	lastUpdate time.Time
+	// addrMine caches authoritative per-address ownership (validateaddress
+	// ismine). listreceivedbyaddress returns the entire address book —
+	// foreign addresses you've merely labelled included — so the My
+	// Addresses panel can't tell which entries are actually yours without
+	// this. A missing key means "not resolved yet". See fetchAddrOwnership.
+	addrMine map[string]bool
 
 	// txsLastBlock is the "lastblock" cursor returned by the previous
 	// listsinceblock call. Empty on first launch — an empty cursor tells
@@ -233,6 +251,12 @@ type Model struct {
 	// footer shows a spinner whenever this is non-zero; when it drops
 	// back to 0 the spinner self-stops.
 	inflight int
+	// spinnerRunning is true while a spinner tick chain is live. It guards
+	// bumpInflight so a burst of back-to-back fetches (each briefly dropping
+	// inflight to 0 and back) can't spawn overlapping spinner timer
+	// goroutines. Set when the chain starts, cleared when a tick finds
+	// inflight == 0 and stops.
+	spinnerRunning bool
 	// spinnerFrame advances on every spinner tick so the footer can cycle
 	// through the frames in update.go's spinnerFrames array.
 	spinnerFrame int
@@ -253,6 +277,15 @@ type Model struct {
 	// + label + amount) pan sideways instead of wrapping. Reset to 0 whenever
 	// focus leaves the panel so re-entering always starts at the left edge.
 	addrHScroll int
+
+	// addrPanelRows is the user's chosen height (in rows) for the My Addresses
+	// panel, set by the +/-/0 resize keys. 0 means "auto" — fall back to the
+	// computed default (see addrPanelHeight). Session-only; never persisted.
+	addrPanelRows int
+
+	// addrTab is the ownership filter the My Addresses panel currently shows,
+	// switched with the 1/2/3 keys. See visibleAddresses.
+	addrTab addrTab
 
 	// anonymous hides monetary amounts on screen. Toggled at runtime via
 	// the "a" hotkey so the user can safely show the dashboard in public.
@@ -302,12 +335,16 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		// Init will fire 5 fetches (wallet, chain, staking, txs, addrs)
 		// right after Bubble Tea calls Init on us. Pre-seeding inflight
 		// here means the spinner's first tick sees a positive counter
-		// and doesn't immediately stop itself.
-		inflight: 5,
-		send:     sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
-		sign:     signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
-		conf:     newConfigState(cfg),
-		edit:     editLabelState{label: labelInput},
+		// and doesn't immediately stop itself. Init starts that spinner
+		// chain directly, so mark it running to keep bumpInflight's guard
+		// honest from the first frame.
+		inflight:       5,
+		spinnerRunning: true,
+		addrMine:       make(map[string]bool),
+		send:           sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
+		sign:           signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
+		conf:           newConfigState(cfg),
+		edit:           editLabelState{label: labelInput},
 	}
 }
 
@@ -323,6 +360,93 @@ func newPassphraseInput() textinput.Model {
 	ti.CharLimit = 128
 	ti.Width = 40
 	return ti
+}
+
+// addrOwnership is the resolved ownership of an address shown in the My
+// Addresses panel. listreceivedbyaddress returns the whole address book, so a
+// labelled foreign address (a send target) appears there looking just like
+// one of your own — the danger the issue tracker flags. validateaddress tells
+// the two apart; until it has, we say nothing rather than imply ownership.
+type addrOwnership int
+
+const (
+	ownUnknown addrOwnership = iota // validateaddress hasn't resolved it yet
+	ownMine                         // validateaddress reported ismine
+	ownForeign                      // validateaddress reported NOT ismine
+)
+
+// ownership reports whether addr is one of the wallet's own addresses,
+// reading the cache populated by fetchAddrOwnership.
+func (m Model) ownership(addr string) addrOwnership {
+	mine, ok := m.addrMine[addr]
+	switch {
+	case !ok:
+		return ownUnknown
+	case mine:
+		return ownMine
+	default:
+		return ownForeign
+	}
+}
+
+// unknownOwnership returns the currently shown addresses whose ownership
+// hasn't been resolved yet, so callers can validate just those.
+func (m Model) unknownOwnership() []string {
+	var out []string
+	for _, a := range m.addresses {
+		if _, ok := m.addrMine[a.Address]; !ok {
+			out = append(out, a.Address)
+		}
+	}
+	return out
+}
+
+// visibleAddresses returns the addresses the panel should show under the active
+// tab. The partition is gap-free (Mine ∪ Others = All): Mine keeps everything
+// that isn't known-foreign (owned, or not yet resolved), so freshly loaded rows
+// appear immediately and only drop out if validateaddress later flags them
+// foreign. Others keeps exactly the foreign ones. All returns the full slice
+// untouched. The cursor, scroll, sign, and edit paths all read this, so the
+// filter lives in one place.
+func (m Model) visibleAddresses() []ReceivedAddress {
+	if m.addrTab == addrTabAll {
+		return m.addresses
+	}
+	wantForeign := m.addrTab == addrTabOthers // else addrTabMine: keep non-foreign
+	var out []ReceivedAddress
+	for _, a := range m.addresses {
+		if (m.ownership(a.Address) == ownForeign) == wantForeign {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// selectedAddress returns the address highlighted in the My Addresses panel —
+// the addrCursor row of the active tab — or nil when the tab is empty or the
+// cursor is somehow out of range. Centralizing the cursor-into-filtered-list
+// bounds check here means callers (the edit/sign entry points) don't each
+// re-derive visibleAddresses() and re-apply the same guard.
+func (m Model) selectedAddress() *ReceivedAddress {
+	visible := m.visibleAddresses()
+	if m.addrCursor < 0 || m.addrCursor >= len(visible) {
+		return nil
+	}
+	return &visible[m.addrCursor]
+}
+
+// addrTabCounts returns the per-tab entry counts for the tab bar. others counts
+// the known-foreign addresses; mine is everything else (own + unknown), which
+// matches the visibleAddresses partition.
+func (m Model) addrTabCounts() (mine, others, all int) {
+	all = len(m.addresses)
+	for _, a := range m.addresses {
+		if m.ownership(a.Address) == ownForeign {
+			others++
+		}
+	}
+	mine = all - others
+	return
 }
 
 // newConfigState builds a fresh configState pre-populated with the values

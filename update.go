@@ -67,6 +67,12 @@ type addrsMsg struct {
 	a   []ReceivedAddress
 	err error
 }
+
+// addrMineMsg carries authoritative ownership flags resolved by
+// validateaddress, keyed by address, to be merged into Model.addrMine.
+type addrMineMsg struct {
+	mine map[string]bool
+}
 type validateMsg struct {
 	v   ValidateAddress
 	err error
@@ -83,17 +89,21 @@ type setLabelResultMsg struct {
 	err error
 }
 
-// spinnerTickMsg fires on a fast timer (every spinnerInterval) while the
-// refresh spinner is running. It is separate from tickMsg because the
-// refresh interval is seconds and the spinner frame rate is ~10 Hz.
+// spinnerTickMsg fires on a timer (every spinnerInterval) while the refresh
+// spinner is running. It is separate from tickMsg because the refresh interval
+// is seconds and the spinner frame rate is ~4 Hz.
 type spinnerTickMsg time.Time
 
 // spinnerFrames is the Braille dot spinner used in the footer while
 // RPC fetches are in flight. The set is 10 frames long so the spinner
-// appears to rotate smoothly at spinnerInterval (100 ms per frame).
+// appears to rotate smoothly at spinnerInterval (250 ms per frame).
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-const spinnerInterval = 100 * time.Millisecond
+// spinnerInterval drives the spinner repaint rate. Each tick triggers a full
+// View() pass, and on a laggy view-link (e.g. SSH to a small box) those writes
+// can back up and stall Bubble Tea's single event loop. 250 ms keeps the
+// animation legible while emitting far fewer frames than a 10 Hz spinner.
+const spinnerInterval = 250 * time.Millisecond
 
 // spinnerTickCmd schedules the next spinner frame. The spinner message
 // handler checks m.inflight before scheduling another tick, so the
@@ -102,13 +112,16 @@ func spinnerTickCmd() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(t time.Time) tea.Msg { return spinnerTickMsg(t) })
 }
 
-// bumpInflight increments the inflight counter and, if the spinner was
-// idle before the bump, returns a spinnerTickCmd to restart it. Callers
-// append the returned Cmd (or nil) to their tea.Batch — tea.Batch
-// silently drops nil, so passing it unconditionally is safe.
+// bumpInflight increments the inflight counter and, if no spinner chain is
+// already running, returns a spinnerTickCmd to start one. Callers append the
+// returned Cmd (or nil) to their tea.Batch — tea.Batch silently drops nil, so
+// passing it unconditionally is safe. Gating on spinnerRunning (rather than
+// inflight == 0) means a burst of back-to-back fetches can't each spawn a
+// fresh spinner lineage that then outlives the others.
 func (m *Model) bumpInflight(n int) tea.Cmd {
 	var cmd tea.Cmd
-	if m.inflight == 0 {
+	if !m.spinnerRunning {
+		m.spinnerRunning = true
 		cmd = spinnerTickCmd()
 	}
 	m.inflight += n
@@ -185,6 +198,32 @@ func fetchAddrs(rpc *RPCClient) tea.Cmd {
 	}
 }
 
+// fetchAddrOwnership resolves the ownership of each given address via
+// validateaddress, serially so the TUI never holds more than one daemon RPC
+// worker at a time (the same good-neighbour policy as refreshAllCmd). Callers
+// pass only addresses whose ownership isn't cached yet, so on an idle wallet
+// this fires once per genuinely new address and then stays quiet.
+//
+// We need it because listreceivedbyaddress returns the whole address book —
+// including foreign addresses you've merely labelled — and those carry no
+// involvesWatchonly flag, so they're otherwise indistinguishable from your
+// own. validateaddress.ismine is (IsMine != ISMINE_NO): true for spendable
+// and watch-only addresses, false only for foreign ones — the same test the
+// official Qt wallet uses to split its Receiving and Sending address lists.
+func fetchAddrOwnership(rpc *RPCClient, addrs []string) tea.Cmd {
+	return func() tea.Msg {
+		mine := make(map[string]bool, len(addrs))
+		for _, a := range addrs {
+			v, err := rpc.ValidateAddress(a)
+			if err != nil {
+				continue // leave unresolved; retried on the next address refresh
+			}
+			mine[a] = v.IsMine
+		}
+		return addrMineMsg{mine}
+	}
+}
+
 // refreshAllCmd fires all five fetches SEQUENTIALLY via tea.Sequence.
 //
 // tea.Sequence, unlike tea.Batch, runs its child Cmds one at a time and
@@ -209,7 +248,7 @@ func (m *Model) refreshAllCmd() tea.Cmd {
 }
 
 // refreshCoreCmd is the serialised 4-fetch batch used on every timer
-// tick. Same rationale as refreshAllCmd — see its comment — but we
+// tick. Same rationale as refreshAllCmd (see its comment), but we
 // deliberately omit fetchAddrs here because ticks are supposed to be
 // lightweight; addresses refresh event-driven from the txsMsg handler
 // when a genuinely new tx is detected.
@@ -319,9 +358,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		// Advance the spinner frame only while something is actually
-		// being fetched. Once inflight drops to 0 the spinner stops
-		// scheduling follow-ups and the footer right-side goes blank.
+		// being fetched. Once inflight drops to 0 the chain stops
+		// scheduling follow-ups, clears spinnerRunning so the next fetch
+		// can start a fresh one, and the footer right-side goes blank.
 		if m.inflight == 0 {
+			m.spinnerRunning = false
 			return m, nil
 		}
 		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
@@ -394,8 +435,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addrsErr = ""
 			// Mirror the tx-list clamp so the cursor never points past
 			// the end when the daemon returns a shorter list than before.
-			m.addrCursor = clampCursor(m.addrCursor, len(m.addresses))
+			// Clamp against the active tab's length, since that's what the
+			// cursor indexes into.
+			m.addrCursor = clampCursor(m.addrCursor, len(m.visibleAddresses()))
+			// Resolve ownership for any address we haven't validated yet so
+			// the panel can flag foreign (not-yours) entries.
+			if unknown := m.unknownOwnership(); len(unknown) > 0 {
+				spin := m.bumpInflight(1)
+				return m, tea.Batch(fetchAddrOwnership(m.rpc, unknown), spin)
+			}
 		}
+		return m, nil
+
+	case addrMineMsg:
+		m.finishFetch()
+		for a, mine := range msg.mine {
+			m.addrMine[a] = mine
+		}
+		// Resolving ownership can move a row out of the active tab (e.g. an
+		// unknown row turns out foreign and leaves the Mine view), so re-clamp
+		// the cursor against the now-current visible length.
+		m.addrCursor = clampCursor(m.addrCursor, len(m.visibleAddresses()))
 		return m, nil
 
 	case validateMsg:
@@ -477,6 +537,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case modeEditLabel:
 		return m.handleEditLabelKey(msg)
+	case modeHelp:
+		// The help sheet is read-only; any key dismisses it.
+		m.mode = modeDashboard
+		return m, nil
 	}
 	// Dashboard-mode keys.
 	switch msg.String() {
@@ -499,15 +563,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openSignModal()
 		return m, nil
 	case "e":
-		// Edit the label of the highlighted address — only meaningful when
-		// the addresses panel is focused and has a valid selection. The
-		// cursor>=0 && <len guard also covers the empty-list case.
-		if m.focusedArea == focusAddr && m.addrCursor >= 0 && m.addrCursor < len(m.addresses) {
+		// Edit the label of the highlighted address — only meaningful when the
+		// addresses panel is focused and has a valid selection (selectedAddress
+		// returns nil for an empty tab or out-of-range cursor).
+		if m.focusedArea == focusAddr && m.selectedAddress() != nil {
 			m.openEditLabelModal()
 		}
 		return m, nil
 	case "c":
 		m.openConfigModal()
+		return m, nil
+	case "?":
+		m.mode = modeHelp
 		return m, nil
 	case "a":
 		m.anonymous = !m.anonymous
@@ -529,10 +596,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "right", "l":
-		// Pan the addresses panel right, clamped to the widest row.
-		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.panelRowWidth()) {
+		// Pan the addresses panel right, clamped to the widest visible row.
+		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.visibleAddresses(), m.panelRowWidth()) {
 			m.addrHScroll++
 		}
+		return m, nil
+	case "1", "2", "3":
+		// Switch the addresses tab (Mine / Others / All). Reset the cursor and
+		// horizontal pan so each tab starts at the top-left, since the visible
+		// rows differ. The key digit maps directly onto the addrTab enum.
+		m.addrTab = addrTab(msg.String()[0] - '1')
+		m.addrCursor = 0
+		m.addrHScroll = 0
 		return m, nil
 	case "enter":
 		// Enter only opens the tx detail modal — pressing it while the
@@ -552,6 +627,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "pgdown", "ctrl+d":
 		m.scrollBy(pageSize)
+		return m, nil
+	case "+", "=":
+		// Grow the addresses panel (push the divider down). Seed from the
+		// current effective height so the first press never jumps, and clamp
+		// so Transactions keeps its 3-row minimum.
+		available := m.availableBodyHeight()
+		m.addrPanelRows = m.clampPanelRows(m.addrPanelHeight(available)+1, available)
+		return m, nil
+	case "-":
+		// Shrink the addresses panel (push the divider up), floored at 3 rows.
+		available := m.availableBodyHeight()
+		m.addrPanelRows = m.clampPanelRows(m.addrPanelHeight(available)-1, available)
+		return m, nil
+	case "0":
+		// Snap the split back to the auto-computed default.
+		m.addrPanelRows = 0
 		return m, nil
 	case "g", "home":
 		m.scrollTo(0)
@@ -577,7 +668,8 @@ const pageSize = 10
 // new case here, not in every helper that scrolls.
 func (m *Model) focusedList() (*int, int) {
 	if m.focusedArea == focusAddr {
-		return &m.addrCursor, len(m.addresses)
+		// Scroll within the active tab, not the full book.
+		return &m.addrCursor, len(m.visibleAddresses())
 	}
 	return &m.txCursor, len(m.txs)
 }
@@ -630,7 +722,7 @@ func (m *Model) openSendModal() {
 	m.send.address.Focus()
 }
 
-// handleSendKey is the send-wizard's input handler. It acts as a small
+// handleSendKey is the send-wizard's input handler. It is a small
 // state machine: the current m.send.step decides which keys do what.
 func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
@@ -754,11 +846,11 @@ func (m *Model) openSignModal() {
 	m.sign.passphrase.SetValue("")
 
 	// Pre-fill from the highlighted address when the addresses panel is
-	// focused and non-empty. Skip straight to the message step in that
+	// focused and has a selection. Skip straight to the message step in that
 	// case so the user doesn't have to press enter on a field that is
 	// already correct.
-	if m.focusedArea == focusAddr && m.addrCursor >= 0 && m.addrCursor < len(m.addresses) {
-		m.sign.address.SetValue(m.addresses[m.addrCursor].Address)
+	if sel := m.selectedAddress(); m.focusedArea == focusAddr && sel != nil {
+		m.sign.address.SetValue(sel.Address)
 		m.sign.step = signStepMessage
 		m.sign.message.Focus()
 		return
@@ -849,11 +941,14 @@ func (m Model) handleSignKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ---- Edit-label modal -------------------------------------------------
 
 // openEditLabelModal opens the edit-label modal pre-filled with the
-// highlighted address's current label, so the user edits in place. The caller
-// (handleKey "e") has already verified the addresses panel is focused and
-// addrCursor is in range.
+// highlighted address's current label, so the user edits in place. It no-ops
+// when there's no valid selection; the caller (handleKey "e") already gates on
+// that, but reading through selectedAddress keeps the modal self-guarding.
 func (m *Model) openEditLabelModal() {
-	sel := m.addresses[m.addrCursor]
+	sel := m.selectedAddress()
+	if sel == nil {
+		return
+	}
 	m.mode = modeEditLabel
 	// Reset the struct to clear any stale busy/errMsg from a previous open,
 	// keeping the configured textinput (placeholder/width).
@@ -1004,8 +1099,12 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	m.txsErr = ""
 	m.addrsErr = ""
 	m.mode = modeDashboard
+	// Don't start a new tickCmd here: the lineage seeded in Init re-arms itself
+	// on every tickMsg and never stops, so it already keeps polling at the new
+	// cfg.Refresh. Starting another would leak a second self-re-arming tick (and
+	// double the refresh rate) on every Apply.
 	spin := m.bumpInflight(5)
-	return m, tea.Batch(m.tickCmd(), m.refreshAllCmd(), spin)
+	return m, tea.Batch(m.refreshAllCmd(), spin)
 }
 
 // txKey is the composite identity of a Transaction entry, used to update an
