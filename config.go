@@ -43,6 +43,7 @@ type Config struct {
 	Refresh     time.Duration
 	ConfPath    string // the conf file we actually read (for display in the config panel); "" if none
 	NetworkName string // "mainnet" or "testnet" — handy for rendering
+	DebugLog    string // --debug-log path; "" disables. Stderr (crash dumps) is redirected here at startup.
 }
 
 // URL builds the JSON-RPC endpoint. Method receivers with a lowercase name
@@ -75,14 +76,15 @@ func LoadConfig(args []string) (Config, error) {
 	// Each flags.String/flags.Bool returns a pointer. Dereferencing it later with
 	// *testnet / *hostFlag gives the value the user supplied (or the default).
 	var (
-		testnet     = flags.Bool("testnet", false, "use testnet conf path + default port")
-		mainnet     = flags.Bool("mainnet", false, "use mainnet (default)")
-		hostFlag    = flags.String("rpc-host", "", "RPC host (default 127.0.0.1)")
-		portFlag    = flags.String("rpc-port", "", "RPC port (default 15715 mainnet / 25715 testnet)")
-		userFlag    = flags.String("rpc-user", "", "RPC username (optional)")
-		passFlag    = flags.String("rpc-password", "", "RPC password (optional; prefer GRC_RPC_PASSWORD env var)")
-		confFlag    = flags.String("conf", "", "path to gridcoinresearch.conf (optional)")
-		refreshFlag = flags.Duration("refresh", defaultRefresh, "refresh interval")
+		testnet      = flags.Bool("testnet", false, "use testnet conf path + default port")
+		mainnet      = flags.Bool("mainnet", false, "use mainnet (default)")
+		hostFlag     = flags.String("rpc-host", "", "RPC host (default 127.0.0.1)")
+		portFlag     = flags.String("rpc-port", "", "RPC port (default 15715 mainnet / 25715 testnet)")
+		userFlag     = flags.String("rpc-user", "", "RPC username (optional)")
+		passFlag     = flags.String("rpc-password", "", "RPC password (optional; prefer GRC_RPC_PASSWORD env var)")
+		confFlag     = flags.String("conf", "", "path to gridcoinresearch.conf (optional)")
+		refreshFlag  = flags.Duration("refresh", defaultRefresh, "refresh interval")
+		debugLogFlag = flags.String("debug-log", "", "redirect stderr (Go crash dumps) to this file for debugging")
 	)
 
 	if err := flags.Parse(args); err != nil {
@@ -94,8 +96,9 @@ func LoadConfig(args []string) (Config, error) {
 	}
 
 	cfg := Config{
-		Testnet: *testnet,
-		Refresh: *refreshFlag,
+		Testnet:  *testnet,
+		Refresh:  *refreshFlag,
+		DebugLog: *debugLogFlag,
 	}
 	if cfg.Testnet {
 		cfg.NetworkName = "testnet"

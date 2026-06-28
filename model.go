@@ -250,6 +250,12 @@ type Model struct {
 	// footer shows a spinner whenever this is non-zero; when it drops
 	// back to 0 the spinner self-stops.
 	inflight int
+	// spinnerRunning is true while a spinner tick chain is live. It guards
+	// bumpInflight so a burst of back-to-back fetches (each briefly dropping
+	// inflight to 0 and back) can't spawn overlapping spinner timer
+	// goroutines. Set when the chain starts, cleared when a tick finds
+	// inflight == 0 and stops.
+	spinnerRunning bool
 	// spinnerFrame advances on every spinner tick so the footer can cycle
 	// through the frames in update.go's spinnerFrames array.
 	spinnerFrame int
@@ -328,13 +334,16 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		// Init will fire 5 fetches (wallet, chain, staking, txs, addrs)
 		// right after Bubble Tea calls Init on us. Pre-seeding inflight
 		// here means the spinner's first tick sees a positive counter
-		// and doesn't immediately stop itself.
-		inflight: 5,
-		addrMine: make(map[string]bool),
-		send:     sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
-		sign:     signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
-		conf:     newConfigState(cfg),
-		edit:     editLabelState{label: labelInput},
+		// and doesn't immediately stop itself. Init starts that spinner
+		// chain directly, so mark it running to keep bumpInflight's guard
+		// honest from the first frame.
+		inflight:       5,
+		spinnerRunning: true,
+		addrMine:       make(map[string]bool),
+		send:           sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
+		sign:           signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
+		conf:           newConfigState(cfg),
+		edit:           editLabelState{label: labelInput},
 	}
 }
 

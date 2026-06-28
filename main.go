@@ -27,6 +27,11 @@ import (
 // The Makefile and goreleaser both set this from the git tag.
 var version = "dev"
 
+// debugLogFile holds the open --debug-log file for the whole process lifetime
+// so it isn't garbage-collected (and closed) after main wires up the stderr
+// redirect. nil when --debug-log was not given.
+var debugLogFile *os.File
+
 func main() {
 	// Handle --version / -v before touching anything else so it works even
 	// when the daemon is down or the conf file is broken.
@@ -60,6 +65,22 @@ func main() {
 			os.Exit(2)
 		}
 		cfg.Password = string(pw)
+	}
+
+	// If --debug-log is set, point stderr at the file before the TUI takes
+	// over, so a Go runtime crash dump (which writes to fd 2 and skips Bubble
+	// Tea's terminal restore) is captured to the file instead of corrupting the
+	// alt-screen display. Done after the password prompt so that prompt still
+	// reaches the terminal. Best-effort: a failure here must not stop the TUI.
+	if cfg.DebugLog != "" {
+		if f, err := os.OpenFile(cfg.DebugLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "debug-log:", err)
+		} else {
+			debugLogFile = f // keep the file alive for the process lifetime
+			if err := redirectStderr(f); err != nil {
+				fmt.Fprintln(os.Stderr, "debug-log: redirect failed:", err)
+			}
+		}
 	}
 
 	rpc := NewRPCClient(cfg)

@@ -89,17 +89,21 @@ type setLabelResultMsg struct {
 	err error
 }
 
-// spinnerTickMsg fires on a fast timer (every spinnerInterval) while the
-// refresh spinner is running. It is separate from tickMsg because the
-// refresh interval is seconds and the spinner frame rate is ~10 Hz.
+// spinnerTickMsg fires on a timer (every spinnerInterval) while the refresh
+// spinner is running. It is separate from tickMsg because the refresh interval
+// is seconds and the spinner frame rate is ~4 Hz.
 type spinnerTickMsg time.Time
 
 // spinnerFrames is the Braille dot spinner used in the footer while
 // RPC fetches are in flight. The set is 10 frames long so the spinner
-// appears to rotate smoothly at spinnerInterval (100 ms per frame).
+// appears to rotate smoothly at spinnerInterval (250 ms per frame).
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-const spinnerInterval = 100 * time.Millisecond
+// spinnerInterval drives the spinner repaint rate. Each tick triggers a full
+// View() pass, and on a laggy view-link (e.g. SSH to a small box) those writes
+// can back up and stall Bubble Tea's single event loop. 250 ms keeps the
+// animation legible while emitting far fewer frames than a 10 Hz spinner.
+const spinnerInterval = 250 * time.Millisecond
 
 // spinnerTickCmd schedules the next spinner frame. The spinner message
 // handler checks m.inflight before scheduling another tick, so the
@@ -108,13 +112,16 @@ func spinnerTickCmd() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(t time.Time) tea.Msg { return spinnerTickMsg(t) })
 }
 
-// bumpInflight increments the inflight counter and, if the spinner was
-// idle before the bump, returns a spinnerTickCmd to restart it. Callers
-// append the returned Cmd (or nil) to their tea.Batch — tea.Batch
-// silently drops nil, so passing it unconditionally is safe.
+// bumpInflight increments the inflight counter and, if no spinner chain is
+// already running, returns a spinnerTickCmd to start one. Callers append the
+// returned Cmd (or nil) to their tea.Batch — tea.Batch silently drops nil, so
+// passing it unconditionally is safe. Gating on spinnerRunning (rather than
+// inflight == 0) means a burst of back-to-back fetches can't each spawn a
+// fresh spinner lineage that then outlives the others.
 func (m *Model) bumpInflight(n int) tea.Cmd {
 	var cmd tea.Cmd
-	if m.inflight == 0 {
+	if !m.spinnerRunning {
+		m.spinnerRunning = true
 		cmd = spinnerTickCmd()
 	}
 	m.inflight += n
@@ -351,9 +358,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		// Advance the spinner frame only while something is actually
-		// being fetched. Once inflight drops to 0 the spinner stops
-		// scheduling follow-ups and the footer right-side goes blank.
+		// being fetched. Once inflight drops to 0 the chain stops
+		// scheduling follow-ups, clears spinnerRunning so the next fetch
+		// can start a fresh one, and the footer right-side goes blank.
 		if m.inflight == 0 {
+			m.spinnerRunning = false
 			return m, nil
 		}
 		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
@@ -1083,8 +1092,12 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	m.txsErr = ""
 	m.addrsErr = ""
 	m.mode = modeDashboard
+	// Don't start a new tickCmd here: the lineage seeded in Init re-arms itself
+	// on every tickMsg and never stops, so it already keeps polling at the new
+	// cfg.Refresh. Starting another would leak a second self-re-arming tick (and
+	// double the refresh rate) on every Apply.
 	spin := m.bumpInflight(5)
-	return m, tea.Batch(m.tickCmd(), m.refreshAllCmd(), spin)
+	return m, tea.Batch(m.refreshAllCmd(), spin)
 }
 
 // txKey is the composite identity of a Transaction entry, used to update an
