@@ -31,6 +31,7 @@ const (
 	modeConfig                    // the runtime config editor modal
 	modeTxDetail                  // a modal showing one transaction in detail
 	modeEditLabel                 // the "edit address label" modal
+	modeHelp                      // the keybinding / capability cheat sheet
 )
 
 // focusArea identifies which scrollable list on the dashboard is "active"

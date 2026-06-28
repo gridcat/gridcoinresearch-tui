@@ -2,19 +2,19 @@
 // the terminal. Every frame of the TUI is produced by View() calling one of
 // the render* helpers below. Keep in mind:
 //
-//   • View is a value receiver, it is pure, it cannot mutate state, and
+//   - View is a value receiver, it is pure, it cannot mutate state, and
 //     Bubble Tea is free to call it as often as it likes.
 //
-//   • We use lipgloss for styling. A lipgloss.Style is a reusable config:
+//   - We use lipgloss for styling. A lipgloss.Style is a reusable config:
 //     .Foreground(color), .Bold(true), .Width(n), .Border(…), .Padding(…),
 //     then .Render(string) to get the final ANSI-coloured text.
 //
-//   • lipgloss.JoinHorizontal / JoinVertical place already-rendered blocks
+//   - lipgloss.JoinHorizontal / JoinVertical place already-rendered blocks
 //     next to each other, they measure the blocks, align them, and return
 //     a new string. No layout engine, just string concatenation with width
 //     awareness.
 //
-//   • All styles that are used on the per-render hot path (every row of
+//   - All styles that are used on the per-render hot path (every row of
 //     the tx list, for example) are defined once at package level so we
 //     don't allocate a fresh Style struct on each frame.
 package main
@@ -32,16 +32,16 @@ import (
 // decimal string, and the terminal renders it via ANSI SGR. Where the
 // terminal doesn't support colour, lipgloss strips the escape sequences.
 var (
-	colorBorder  = lipgloss.Color("240")
-	colorMuted   = lipgloss.Color("244")
-	colorLabel   = lipgloss.Color("250")
-	colorValue   = lipgloss.Color("255")
-	colorGood    = lipgloss.Color("42")  // green
-	colorWarn    = lipgloss.Color("214") // orange
-	colorBad     = lipgloss.Color("203") // red
-	colorMainnet = lipgloss.Color("42")
-	colorTestnet = lipgloss.Color("214")
-	colorAccent  = lipgloss.Color("75")
+	colorBorder      = lipgloss.Color("240")
+	colorMuted       = lipgloss.Color("244")
+	colorLabel       = lipgloss.Color("250")
+	colorValue       = lipgloss.Color("255")
+	colorGood        = lipgloss.Color("42")  // green
+	colorWarn        = lipgloss.Color("214") // orange
+	colorBad         = lipgloss.Color("203") // red
+	colorMainnet     = lipgloss.Color("42")
+	colorTestnet     = lipgloss.Color("214")
+	colorAccent      = lipgloss.Color("75")
 	colorRowSelected = lipgloss.Color("236") // highlight background for the selected row
 
 	// styleBorder is the rounded-corner box used for every panel on the
@@ -119,6 +119,8 @@ func (m Model) View() string {
 		return m.renderTxDetailModal()
 	case modeEditLabel:
 		return m.renderEditLabelModal()
+	case modeHelp:
+		return m.renderHelpModal()
 	}
 	return m.renderDashboard()
 }
@@ -127,11 +129,11 @@ func (m Model) View() string {
 // vertical-budget math so nothing gets pushed off screen when the terminal
 // is short. Pseudo-layout:
 //
-//     ┌────────────── header ──────────────┐
-//     │───────────── stats ─────────────│
-//     │─────── My Addresses (capped) ───│
-//     │─────── Transactions (stretch) ──│
-//     │───────────── footer ────────────│
+//	┌────────────── header ───────────┐
+//	│───────────── stats ─────────────│
+//	│─────── My Addresses (capped) ───│
+//	│─────── Transactions (stretch) ──│
+//	│───────────── footer ────────────│
 //
 // Transactions get priority; addresses are capped to min(available/3, 8).
 func (m Model) renderDashboard() string {
@@ -664,10 +666,10 @@ func sliceByCols(text string, lo, hi int) string {
 // renderTxList draws the scrollable transactions panel, sized to fill the
 // vertical space that renderDashboard handed it. Scroll math:
 //
-//   txCursor: index of the currently selected tx in m.txs
-//   offset: index of the tx shown at the top of the visible window
-//               (derived fresh every frame from cursor + maxRows)
-//   maxRows: how many data rows fit inside the box this frame
+//	txCursor: index of the currently selected tx in m.txs
+//	offset: index of the tx shown at the top of the visible window
+//	            (derived fresh every frame from cursor + maxRows)
+//	maxRows: how many data rows fit inside the box this frame
 //
 // We slide offset just enough to keep the cursor in view.
 func (m Model) renderTxList(height int) string {
@@ -763,7 +765,7 @@ func (m Model) renderFooter() string {
 	if m.anonymous {
 		anonLabel = "[a]non ●"
 	}
-	keys := []string{"[s]end", "sign [m]sg"}
+	keys := []string{"[?]help", "[s]end", "sign [m]sg"}
 	// [e]dit label only acts on the focused addresses panel, so surface it
 	// contextually rather than implying it works everywhere. (The 1/2/3 tab
 	// keys are self-documented in the panel's own tab bar.)
@@ -1070,6 +1072,63 @@ func (m Model) renderTxDetailModal() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
+// renderHelpModal is the read-only cheat sheet opened with "?". It lists every
+// key grouped by what it does, with a short plain-language note on each, plus a
+// one-line summary of what the dashboard is. Any key closes it (handled in
+// update.go::handleKey, case modeHelp).
+func (m Model) renderHelpModal() string {
+	// keyRow renders one "keys → what they do" line: the keys in the accent
+	// colour in a fixed-width column so the descriptions line up.
+	keyRow := func(keys, desc string) string {
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			styleAccent.Width(12).Render(keys),
+			styleLabel.Render(desc),
+		)
+	}
+
+	lines := []string{
+		styleTitle.Render("Help"),
+		styleMuted.Render("A read-only view of a running Gridcoin wallet: balance, staking,"),
+		styleMuted.Render("lock, block height, your addresses, and recent transactions."),
+		styleMuted.Render("You can also send coins, sign a message, or relabel an address."),
+		"",
+		styleTitle.Render("Move around"),
+		keyRow("↑ ↓  k j", "Move the cursor in the focused panel"),
+		keyRow("PgUp PgDn", "Jump a page (also Ctrl+U / Ctrl+D)"),
+		keyRow("g G", "First / last row (also Home / End)"),
+		keyRow("Tab", "Switch focus between the two panels"),
+		keyRow("← →  h l", "Slide a too-wide address row sideways"),
+		"",
+		styleTitle.Render("My Addresses"),
+		keyRow("1 2 3", "Show Mine, Others, or All addresses"),
+		keyRow("+ −", "Grow or shrink the panel; 0 resets it"),
+		keyRow("e", "Rename the selected address (blank clears it)"),
+		"",
+		styleTitle.Render("Do things"),
+		keyRow("Enter", "Open the selected transaction in full"),
+		keyRow("s", "Send GRC (checks the address, unlocks only if needed)"),
+		keyRow("m", "Sign a message with one of your addresses"),
+		keyRow("c", "Change host, port, login, or refresh for this session"),
+		keyRow("a", "Hide every amount on screen, handy when sharing"),
+		keyRow("r", "Refresh now instead of waiting for the next poll"),
+		keyRow("? q", "This help; q quits (also Ctrl+C)"),
+		"",
+		styleMuted.Render("press any key to close"),
+	}
+
+	modalWidth := 66
+	if max := m.width - 4; modalWidth > max && max > 0 {
+		modalWidth = max
+	}
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(modalWidth).
+		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
 func (m Model) renderConfigModal() string {
 	row := func(label string, field configField, value string) string {
 		prefix := "  "
@@ -1151,4 +1210,3 @@ func (m Model) renderConfigModal() string {
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
-

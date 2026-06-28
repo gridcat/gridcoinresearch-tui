@@ -537,6 +537,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case modeEditLabel:
 		return m.handleEditLabelKey(msg)
+	case modeHelp:
+		// The help sheet is read-only; any key dismisses it.
+		m.mode = modeDashboard
+		return m, nil
 	}
 	// Dashboard-mode keys.
 	switch msg.String() {
@@ -568,6 +572,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "c":
 		m.openConfigModal()
+		return m, nil
+	case "?":
+		m.mode = modeHelp
 		return m, nil
 	case "a":
 		m.anonymous = !m.anonymous
