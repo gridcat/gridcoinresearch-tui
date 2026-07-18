@@ -80,6 +80,15 @@ var (
 	styleTxAmountCol = lipgloss.NewStyle().Width(18).Align(lipgloss.Right)
 	styleTxAddrCol   = lipgloss.NewStyle().Width(16)
 	styleTxTimeCol   = lipgloss.NewStyle().Width(12)
+
+	// Poll list columns. Title has no fixed width — it flexes to fill whatever
+	// these three fixed columns leave (see renderPollRow), so the row spans the
+	// full damn panel and the title gets the most room. The stat column holds
+	// either the cheap "N votes" count or, once the lazy tally lands, the "62% Yes"
+	// participation + leading answer.
+	stylePollWeightCol = lipgloss.NewStyle().Width(6).Foreground(colorMuted)
+	stylePollStatCol   = lipgloss.NewStyle().Width(22).Foreground(colorMuted)
+	stylePollTimeCol   = lipgloss.NewStyle().Width(8).Align(lipgloss.Right).Foreground(colorMuted)
 )
 
 // txKindStyle maps the status enum defined in format.go to the lipgloss
@@ -121,6 +130,10 @@ func (m Model) View() string {
 		return m.renderEditLabelModal()
 	case modeHelp:
 		return m.renderHelpModal()
+	case modePolls:
+		return m.renderPollsScreen()
+	case modePollDetail:
+		return m.renderPollDetailModal()
 	}
 	return m.renderDashboard()
 }
@@ -663,6 +676,55 @@ func sliceByCols(text string, lo, hi int) string {
 	return b.String()
 }
 
+// truncate shortens text to at most maxCols display columns, appending an
+// ellipsis when it had to cut. Width-aware (wide glyphs count as 2) so it
+// never overflows a fixed-width column. maxCols <= 0 returns "".
+func truncate(text string, maxCols int) string {
+	if maxCols <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(text) <= maxCols {
+		return text
+	}
+	return runewidth.Truncate(text, maxCols, "…")
+}
+
+// renderBar draws a fixed-width proportional bar (filled █ + empty ░) for a
+// fraction in [0,1] — used by the poll detail popup's per-choice results
+// breakdown. Out-of-range fractions are clamped.
+func renderBar(fraction float64, width int) string {
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+	filled := int(fraction*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	return styleAccent.Render(strings.Repeat("█", filled)) + styleMuted.Render(strings.Repeat("░", width-filled))
+}
+
+// listWindow computes the visible-row budget and scroll offset for a bordered
+// scroll panel that is `height` rows tall and holds `total` rows. The chrome is
+// 3 rows (2 border + 1 title), and the offset slides forward only — starting at
+// 0 and advancing just enough to keep the cursor on the last visible row.
+// Shared by renderTxList and renderPollsList so their scroll math can't drift.
+func listWindow(height, cursor, total int) (maxRows, offset int) {
+	maxRows = height - 3
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if maxRows > total {
+		maxRows = total
+	}
+	if cursor >= maxRows {
+		offset = cursor - maxRows + 1
+	}
+	return maxRows, offset
+}
+
 // renderTxList draws the scrollable transactions panel, sized to fill the
 // vertical space that renderDashboard handed it. Scroll math:
 //
@@ -689,22 +751,7 @@ func (m Model) renderTxList(height int) string {
 		return boxStyle.Render(title + "\n" + styleMuted.Render("no transactions yet"))
 	}
 
-	// Rows that actually show tx data: subtract borders (2), title (1).
-	maxRows := height - 3
-	if maxRows < 1 {
-		maxRows = 1
-	}
-	if maxRows > len(m.txs) {
-		maxRows = len(m.txs)
-	}
-
-	// Derive the window offset from the cursor. Starts from 0 and slides
-	// forward when the cursor moves past the current window.
-	offset := 0
-	if m.txCursor >= maxRows {
-		offset = m.txCursor - maxRows + 1
-	}
-
+	maxRows, offset := listWindow(height, m.txCursor, len(m.txs))
 	lines := []string{title}
 	for i := offset; i < offset+maxRows && i < len(m.txs); i++ {
 		prefix := "  "
@@ -760,6 +807,242 @@ func renderTxRow(tx Transaction, anonymous bool) string {
 	)
 }
 
+// renderPollsScreen is the full-screen governance polls list (mode "p"). It
+// reuses the dashboard header (network badge + block height) so the chrome
+// matches, fills the middle with the scrollable poll list, and pins a
+// polls-specific key legend at the bottom.
+func (m Model) renderPollsScreen() string {
+	header := m.renderHeader()
+	footer := m.renderPollsFooter()
+	available := m.height - lipgloss.Height(header) - lipgloss.Height(footer)
+	if available < 3 {
+		available = 3
+	}
+	body := m.renderPollsList(available)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+// renderPollsList draws the scrollable poll rows. Same cursor-window scroll
+// math as renderTxList: the offset is derived fresh each frame from pollCursor
+// so nothing needs storing on the by-value Model.
+func (m Model) renderPollsList(height int) string {
+	boxStyle := styleBorderFocused.Width(m.width - 2).Height(height - 2)
+	scope := "all"
+	if !m.pollsShowFinished {
+		scope = "active"
+	}
+	title := styleTitle.Render("Polls") + "  " + styleMuted.Render(scope)
+
+	// Loading / error / empty all render as the title plus one status line.
+	var status string
+	switch {
+	case !m.pollsLoaded:
+		status = styleMuted.Render("loading…")
+	case m.pollsErr != "":
+		status = styleBad.Render("error: " + m.pollsErr)
+	case len(m.polls) == 0:
+		status = styleMuted.Render("no polls")
+	}
+	if status != "" {
+		return boxStyle.Render(title + "\n" + status)
+	}
+
+	maxRows, offset := listWindow(height, m.pollCursor, len(m.polls))
+	lines := []string{title}
+	for i := offset; i < offset+maxRows && i < len(m.polls); i++ {
+		prefix := "  "
+		line := m.renderPollRow(m.polls[i])
+		if i == m.pollCursor {
+			prefix = styleAccent.Background(colorRowSelected).Render("▸ ")
+			line = fillBackground(line, m.panelRowWidth())
+		}
+		lines = append(lines, prefix+line)
+	}
+	return boxStyle.Render(strings.Join(lines, "\n"))
+}
+
+// renderPollRow renders one poll line: status dot · title · weight-type ·
+// stat · time-left. The stat column shows the lazily-fetched tally
+// ("62% Yes") once it's cached, otherwise the cheap "N votes" count from
+// listpolls.
+func (m Model) renderPollRow(p Poll) string {
+	// Parse the expiration once and derive both the status dot and the
+	// time-left column from it (both PollExpired and FormatPollTimeLeft would
+	// otherwise re-parse the same string every frame).
+	exp := ParsePollTime(p.Expiration)
+	dot := styleGood.Render("●")
+	if pollExpired(exp) {
+		dot = styleMuted.Render("○")
+	}
+
+	// Flex the title to fill the row: panel width minus the dot (1), its
+	// trailing space (1), the two-space gap before the stat column, and the
+	// three fixed columns. GetWidth keeps this correct if those widths change.
+	fixed := 2 + stylePollWeightCol.GetWidth() + 2 + stylePollStatCol.GetWidth() + stylePollTimeCol.GetWidth()
+	titleWidth := m.panelRowWidth() - fixed
+	if titleWidth < 12 {
+		titleWidth = 12
+	}
+	title := lipgloss.NewStyle().Width(titleWidth).Render(truncate(p.Title, titleWidth-1))
+	weight := stylePollWeightCol.Render(ShortWeightType(p.WeightType))
+
+	var stat string
+	if r, ok := m.pollResults[p.ID]; ok {
+		pct := "—"
+		if r.VotePercentAVW != nil {
+			pct = fmt.Sprintf("%.0f%%", *r.VotePercentAVW)
+		}
+		leader := r.TopChoice
+		if leader == "" {
+			leader = "—"
+		}
+		stat = fmt.Sprintf("%-4s %s", pct, leader)
+	} else {
+		stat = fmt.Sprintf("%d votes", p.Votes)
+	}
+	statCol := stylePollStatCol.Render(truncate(stat, 21))
+
+	timeCol := stylePollTimeCol.Render(formatPollTimeLeft(exp))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, dot, " ", title, weight, "  ", statCol, timeCol)
+}
+
+// renderPollDetailModal is the centered popup opened with enter on a selected
+// poll. It shows the full poll metadata plus, from the lazily-fetched
+// getpollresults tally cached in m.pollResults, a per-choice results breakdown
+// (each option's share of the total weight as a bar). If the tally is still in
+// flight the results section shows "tallying…" and fills in when it lands.
+func (m Model) renderPollDetailModal() string {
+	p := m.selectedPoll()
+	if p == nil {
+		// Selection vanished (list reloaded to empty); fall back to the list.
+		return m.renderPollsScreen()
+	}
+
+	field := func(label, value string) string {
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			styleLabel.Width(14).Render(label),
+			styleValue.Render(value),
+		)
+	}
+	orDash := func(s string) string {
+		if s == "" {
+			return "—"
+		}
+		return s
+	}
+
+	exp := ParsePollTime(p.Expiration)
+	var status string
+	if pollExpired(exp) {
+		status = styleMuted.Render("○ ended")
+	} else {
+		status = styleGood.Render("● active") + styleMuted.Render(" · "+formatPollTimeLeft(exp)+" left")
+	}
+
+	lines := []string{
+		styleTitle.Render("Poll"),
+		"",
+		field("Title", p.Title),
+		field("Status", status),
+		field("Question", orDash(truncate(p.Question, 74))),
+		field("URL", orDash(truncate(p.URL, 74))),
+		field("Weight type", orDash(p.WeightType)),
+		field("Responses", orDash(p.ResponseType)),
+		field("Created", orDash(p.Timestamp)),
+		field("Duration", fmt.Sprintf("%d days", p.DurationDays)),
+		field("Votes", fmt.Sprintf("%d", p.Votes)),
+	}
+
+	r, ok := m.pollResults[p.ID]
+	if ok && r.VotePercentAVW != nil {
+		lines = append(lines, field("Participation", fmt.Sprintf("%.1f%% AVW", *r.VotePercentAVW)))
+	}
+
+	lines = append(lines, "", styleTitle.Render("Results"))
+	switch {
+	case ok && len(r.Responses) == 0:
+		lines = append(lines, styleMuted.Render("  no votes yet"))
+	case !ok && m.pollResultErr[p.ID] != "":
+		// The tally finished with an error (e.g. a transient reorg per the
+		// daemon's getpollresults note). Show it instead of a stuck spinner.
+		lines = append(lines,
+			styleBad.Render("  couldn't load results: "+m.pollResultErr[p.ID]),
+			styleMuted.Render("  press r to retry"))
+	case !ok:
+		// Pending, or the brief window just after opening: animate so it's
+		// clearly still working, not frozen.
+		lines = append(lines, styleMuted.Render("  tallying… "+spinnerFrames[m.spinnerFrame]))
+	default:
+		// Each response is two lines: the full choice text (poll answers are
+		// often whole sentences, so truncating them into a column would hide the
+		// point), then an indented stats line — a share bar plus labelled
+		// numbers, so it's clear what each figure means without a column header.
+		for _, resp := range r.Responses {
+			frac := 0.0
+			if r.TotalWeight > 0 {
+				frac = resp.Weight / r.TotalWeight
+			}
+			stats := fmt.Sprintf("%.0f%% share · %s weight · %s votes",
+				frac*100, formatCompactNumber(resp.Weight), formatVoteCount(resp.Votes))
+			lines = append(lines,
+				"  "+styleValue.Render(resp.Choice),
+				lipgloss.JoinHorizontal(lipgloss.Top, "    ", renderBar(frac, 16), "  ", styleMuted.Render(stats)),
+			)
+		}
+	}
+	lines = append(lines, "", styleMuted.Render("enter/esc to close"))
+
+	width := m.width - 8
+	if width > 96 {
+		width = 96
+	}
+	if width < 40 {
+		width = 40
+	}
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(width).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+// renderStatusBar renders one bordered full-width bar: the key legend on the
+// left, and the refresh spinner (labelled spinnerLabel) pinned to the right
+// while any RPC fetch is in flight. Shared by the dashboard footer and the
+// polls-screen footer so their width/gap budget can't drift.
+func (m Model) renderStatusBar(keys []string, spinnerLabel string) string {
+	left := styleMuted.Render(strings.Join(keys, "  "))
+	right := ""
+	if m.inflight > 0 {
+		right = styleAccent.Render(spinnerFrames[m.spinnerFrame] + " " + spinnerLabel)
+	}
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
+	if gap < 1 {
+		gap = 1
+	}
+	line := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gap), right)
+	return styleBorder.Width(m.width - 2).Render(line)
+}
+
+// renderPollsFooter is the key legend for the polls screen: scope toggle,
+// scrolling, refresh, and back.
+func (m Model) renderPollsFooter() string {
+	scopeKey := "[tab] show active"
+	if !m.pollsShowFinished {
+		scopeKey = "[tab] show all"
+	}
+	return m.renderStatusBar([]string{
+		scopeKey,
+		"[enter] details",
+		"[↑/↓ · pgup/pgdn] scroll",
+		"[r]efresh",
+		"[esc] back",
+	}, "loading")
+}
+
 func (m Model) renderFooter() string {
 	anonLabel := "[a]non"
 	if m.anonymous {
@@ -773,6 +1056,7 @@ func (m Model) renderFooter() string {
 		keys = append(keys, "[e]dit label")
 	}
 	keys = append(keys,
+		"[p]olls",
 		"[c]onfig",
 		"[r]efresh",
 		anonLabel,
@@ -781,21 +1065,11 @@ func (m Model) renderFooter() string {
 		"[+/-] resize",
 		"[q]uit",
 	)
-	left := styleMuted.Render(strings.Join(keys, "  "))
-	right := ""
-	// While any RPC fetch is in flight we show a spinning Braille dot
-	// so the user can see the TUI is alive and talking to the daemon.
-	// When all fetches settle the right side goes blank, a brief flash
-	// every refresh interval rather than a persistent clock.
-	if m.inflight > 0 {
-		right = styleAccent.Render(spinnerFrames[m.spinnerFrame] + " refreshing")
-	}
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
-	if gap < 1 {
-		gap = 1
-	}
-	line := lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gap), right)
-	return styleBorder.Width(m.width - 2).Render(line)
+	// The right side shows a spinning Braille dot while any RPC fetch is in
+	// flight so the user can see the TUI is alive and talking to the daemon;
+	// when all fetches settle it goes blank — a brief flash every refresh
+	// interval rather than a persistent clock.
+	return m.renderStatusBar(keys, "refreshing")
 }
 
 func (m Model) renderSendModal() string {
@@ -1108,6 +1382,7 @@ func (m Model) renderHelpModal() string {
 		keyRow("Enter", "Open the selected transaction in full"),
 		keyRow("s", "Send GRC (checks the address, unlocks only if needed)"),
 		keyRow("m", "Sign a message with one of your addresses"),
+		keyRow("p", "Browse on-chain governance polls (tab: all / active)"),
 		keyRow("c", "Change host, port, login, or refresh for this session"),
 		keyRow("a", "Hide every amount on screen, handy when sharing"),
 		keyRow("r", "Refresh now instead of waiting for the next poll"),

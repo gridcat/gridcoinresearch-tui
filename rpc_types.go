@@ -179,3 +179,53 @@ func (r ReceivedAddress) DisplayLabel() string {
 	}
 	return r.Account
 }
+
+// Poll is one entry from the listpolls RPC (governance / voting). Following the
+// file convention we decode only the fields the TUI renders: the list row
+// (Title/WeightType/Expiration/Votes) plus the detail popup
+// (Question/URL/ResponseType/DurationDays/Timestamp). The per-choice labels the
+// popup's results breakdown shows come from the tally's responses[] (see
+// PollResult), not from the poll's own choices[], so choices[] stays undecoded.
+// Two things about the wire shape are worth knowing:
+//
+//   - Expiration and Timestamp arrive as PRE-FORMATTED "MM-DD-YYYY HH:MM:SS"
+//     UTC strings (gridcoinresearchd's TimestampToHRDate), NOT unix ints — see
+//     ParsePollTime / FormatPollTimeLeft in format.go.
+//   - Votes is just the raw count of votes cast. The participation percentage
+//     and the leading answer are NOT part of listpolls; they come from the
+//     heavier getpollresults tally (see PollResult), fetched lazily per poll.
+type Poll struct {
+	Title        string `json:"title"`
+	ID           string `json:"id"`
+	Question     string `json:"question"`
+	URL          string `json:"url"`
+	WeightType   string `json:"weight_type"`   // "Magnitude" | "Balance" | "Magnitude+Balance" | ...
+	ResponseType string `json:"response_type"` // "Yes/No/Abstain" | "Single Choice" | "Multiple Choice"
+	DurationDays int    `json:"duration_days"`
+	Timestamp    string `json:"timestamp"`  // when the poll was created, "MM-DD-YYYY HH:MM:SS" UTC
+	Expiration   string `json:"expiration"` // "MM-DD-YYYY HH:MM:SS" UTC
+	Votes        int    `json:"votes"`      // number of votes cast
+}
+
+// PollResult is the getpollresults response for a single poll — the heavy
+// tally the daemon computes by walking every vote. We fetch it lazily for the
+// poll under the cursor, never in the refresh loop. VotePercentAVW is a pointer
+// because the daemon omits it before any vote, so "absent" is distinguishable
+// from a legitimate zero; top_choice arrives as JSON null in that same case,
+// which decodes to the empty string. Responses drives the detail popup's
+// per-choice breakdown (share of TotalWeight).
+type PollResult struct {
+	VotePercentAVW *float64       `json:"vote_percent_avw"`
+	TopChoice      string         `json:"top_choice"`
+	TotalWeight    float64        `json:"total_weight"`
+	Responses      []PollResponse `json:"responses"`
+}
+
+// PollResponse is one per-choice tally inside PollResult.Responses. Votes is a
+// float, not an int: in a multiple-choice poll a voter can split one vote
+// across choices, so the daemon reports fractional per-choice counts (e.g. 153.5).
+type PollResponse struct {
+	Choice string  `json:"choice"`
+	Weight float64 `json:"weight"`
+	Votes  float64 `json:"votes"`
+}

@@ -1,10 +1,10 @@
 // This file declares the Bubble Tea Model — the single struct that holds
 // ALL of the TUI's state. Bubble Tea uses an Elm-inspired architecture:
 //
-//   • Model  — all state lives here (this file)
-//   • Update — receives messages, returns a new Model and an optional Cmd
-//              to run next. Defined in update.go.
-//   • View   — renders the current Model to a string. Defined in view.go.
+//   - Model  — all state lives here (this file)
+//   - Update — receives messages, returns a new Model and an optional Cmd
+//     to run next. Defined in update.go.
+//   - View   — renders the current Model to a string. Defined in view.go.
 //
 // The loop is: message in → Update returns (Model, Cmd) → View renders →
 // next message arrives. No global variables, no hidden state. If you can't
@@ -25,13 +25,15 @@ import (
 type viewMode int
 
 const (
-	modeDashboard viewMode = iota // the default full-screen dashboard
-	modeSend                      // the "send GRC" wizard modal
-	modeSign                      // the "sign message" wizard modal
-	modeConfig                    // the runtime config editor modal
-	modeTxDetail                  // a modal showing one transaction in detail
-	modeEditLabel                 // the "edit address label" modal
-	modeHelp                      // the keybinding / capability cheat sheet
+	modeDashboard  viewMode = iota // the default full-screen dashboard
+	modeSend                       // the "send GRC" wizard modal
+	modeSign                       // the "sign message" wizard modal
+	modeConfig                     // the runtime config editor modal
+	modeTxDetail                   // a modal showing one transaction in detail
+	modeEditLabel                  // the "edit address label" modal
+	modeHelp                       // the keybinding / capability cheat sheet
+	modePolls                      // the full-screen governance polls list
+	modePollDetail                 // a modal showing one poll in full (opened from modePolls)
 )
 
 // focusArea identifies which scrollable list on the dashboard is "active"
@@ -291,6 +293,27 @@ type Model struct {
 	// the "a" hotkey so the user can safely show the dashboard in public.
 	anonymous bool
 
+	// ---- Polls (governance) --------------------------------------------
+	// Populated lazily when the polls screen is opened with "p", and never on
+	// the refresh tick — listpolls (and especially the per-poll getpollresults
+	// tally) is heavier than the dashboard fetches.
+	polls       []Poll
+	pollCursor  int
+	pollsLoaded bool
+	pollsErr    string
+	// pollsShowFinished mirrors listpolls's `showfinished` argument. Defaults
+	// to true ("all polls"); the tab key toggles it to false (active only).
+	pollsShowFinished bool
+	// pollResults caches getpollresults tallies keyed by poll ID, filled in
+	// lazily for the poll under the cursor (participation % + leading answer).
+	// pollResultPending guards against firing a second tally while one is in
+	// flight. pollResultErr records a failed tally so the detail popup can show
+	// why (rather than a perpetual "tallying…") and offer a retry; a poll is in
+	// exactly one of these three states, or none before it's ever fetched.
+	pollResults       map[string]PollResult
+	pollResultPending map[string]bool
+	pollResultErr     map[string]string
+
 	// Modal sub-states. Only one modal is active at a time, but keeping
 	// both fields means we preserve state if the user hits esc and comes
 	// back.
@@ -341,10 +364,16 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		inflight:       5,
 		spinnerRunning: true,
 		addrMine:       make(map[string]bool),
-		send:           sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
-		sign:           signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
-		conf:           newConfigState(cfg),
-		edit:           editLabelState{label: labelInput},
+		// Default the polls screen to "all polls" (incl. finished); tab narrows
+		// it to active only. The lazy-tally caches start empty.
+		pollsShowFinished: true,
+		pollResults:       make(map[string]PollResult),
+		pollResultPending: make(map[string]bool),
+		pollResultErr:     make(map[string]string),
+		send:              sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
+		sign:              signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
+		conf:              newConfigState(cfg),
+		edit:              editLabelState{label: labelInput},
 	}
 }
 
@@ -433,6 +462,15 @@ func (m Model) selectedAddress() *ReceivedAddress {
 		return nil
 	}
 	return &visible[m.addrCursor]
+}
+
+// selectedPoll returns the poll the cursor is on in the polls screen, or nil
+// when the list is empty or the cursor is out of range.
+func (m Model) selectedPoll() *Poll {
+	if m.pollCursor < 0 || m.pollCursor >= len(m.polls) {
+		return nil
+	}
+	return &m.polls[m.pollCursor]
 }
 
 // addrTabCounts returns the per-tab entry counts for the tab bar. others counts
