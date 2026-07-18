@@ -113,3 +113,23 @@ func (c *RPCClient) ListReceivedByAddress() ([]ReceivedAddress, error) {
 	err := c.Call("listreceivedbyaddress", []any{0, true, true}, &out)
 	return out, err
 }
+
+// ListPolls returns the current governance polls. The single boolean is
+// listpolls's `showfinished` argument: false returns only polls whose voting
+// window is still open, true also includes finished ones. The response is a
+// plain array of Poll and carries only a vote COUNT — the participation
+// percentage and leading answer come from GetPollResults.
+func (c *RPCClient) ListPolls(includeFinished bool) ([]Poll, error) {
+	var out []Poll
+	err := c.Call("listpolls", []any{includeFinished}, &out)
+	return out, err
+}
+
+// GetPollResults runs the getpollresults tally for one poll, addressed by
+// title or id. It is comparatively heavy — the daemon walks every vote — so
+// callers fetch it lazily, one poll at a time, and never on the refresh tick.
+func (c *RPCClient) GetPollResults(titleOrID string) (PollResult, error) {
+	var r PollResult
+	err := c.Call("getpollresults", []any{titleOrID}, &r)
+	return r, err
+}

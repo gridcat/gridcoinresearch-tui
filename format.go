@@ -191,6 +191,104 @@ func FormatStakeETA(seconds int64) string {
 	}
 }
 
+// pollTimeLayout matches gridcoinresearchd's TimestampToHRDate output
+// ("%m-%d-%Y %H:%M:%S"), which is emitted in UTC. Go's reference time spells
+// that same layout as "01-02-2006 15:04:05".
+const pollTimeLayout = "01-02-2006 15:04:05"
+
+// ParsePollTime parses a gridcoinresearchd HR date string (poll
+// expiration/timestamp) as UTC. Returns the zero time on any parse failure, so
+// callers can treat "couldn't read it" the same as "unknown" rather than
+// crashing if a future daemon changes the format.
+func ParsePollTime(s string) time.Time {
+	t, err := time.Parse(pollTimeLayout, strings.TrimSpace(s))
+	if err != nil {
+		return time.Time{}
+	}
+	return t // a zoneless layout parses as UTC already
+}
+
+// PollExpired reports whether a poll's expiration has passed, derived from the
+// HR date string. An unparseable/empty expiration returns false (treat as
+// still active) so a format surprise never hides live polls.
+func PollExpired(expiration string) bool {
+	return pollExpired(ParsePollTime(expiration))
+}
+
+// pollExpired is the parsed-time form of PollExpired, so a caller that already
+// has the parsed expiration (e.g. renderPollRow) doesn't re-parse the string.
+func pollExpired(exp time.Time) bool {
+	return !exp.IsZero() && time.Now().After(exp)
+}
+
+// FormatPollTimeLeft renders how long until a poll closes as a compact
+// "3d 4h" / "5h 2m" / "12m" string, "ended" once past, or "—" if the
+// expiration string didn't parse. Reuses FormatStakeETA's unit picking so poll
+// countdowns read the same as the stake ETA elsewhere.
+func FormatPollTimeLeft(expiration string) string {
+	return formatPollTimeLeft(ParsePollTime(expiration))
+}
+
+// formatPollTimeLeft is the parsed-time form of FormatPollTimeLeft, so a caller
+// with the expiration already parsed avoids a second time.Parse.
+func formatPollTimeLeft(exp time.Time) string {
+	if exp.IsZero() {
+		return "—"
+	}
+	remaining := time.Until(exp)
+	if remaining <= 0 {
+		return "ended"
+	}
+	return FormatStakeETA(int64(remaining.Seconds()))
+}
+
+// formatCompactNumber renders a (possibly large) number as a short "10.2M" /
+// "4.1K" / "512" string for the poll detail popup's per-choice weight column,
+// where the exact figure matters less than the order of magnitude. Weights are
+// magnitude- or balance-derived depending on the poll, so it carries no unit.
+func formatCompactNumber(n float64) string {
+	abs := math.Abs(n)
+	switch {
+	case abs >= 1e9:
+		return strconv.FormatFloat(n/1e9, 'f', 1, 64) + "B"
+	case abs >= 1e6:
+		return strconv.FormatFloat(n/1e6, 'f', 1, 64) + "M"
+	case abs >= 1e3:
+		return strconv.FormatFloat(n/1e3, 'f', 1, 64) + "K"
+	default:
+		return strconv.FormatFloat(n, 'f', 0, 64)
+	}
+}
+
+// formatVoteCount renders a poll response's vote count to two decimals. The
+// daemon may report a fraction (a voter can split one vote across choices in a
+// multiple-choice poll), often with long repeating decimals like
+// 5.833333333333333, so we fix the precision at two places: "153.50", "5.83".
+func formatVoteCount(v float64) string {
+	return strconv.FormatFloat(v, 'f', 2, 64)
+}
+
+// ShortWeightType abbreviates a poll's weight_type for the narrow list column.
+// The full strings come from Poll::WeightTypeToString in the daemon.
+func ShortWeightType(wt string) string {
+	switch strings.ToLower(wt) {
+	case "magnitude":
+		return "Mag"
+	case "balance":
+		return "Bal"
+	case "magnitude+balance":
+		return "M+B"
+	case "cpid count":
+		return "CPID"
+	case "participant count":
+		return "Part"
+	case "":
+		return "—"
+	default:
+		return wt
+	}
+}
+
 // TxStatusKind is a type-safe enum for the transaction status bucket we
 // render in the UI. Using an integer enum (rather than raw strings) means
 // the compiler catches typos in switch statements that would otherwise

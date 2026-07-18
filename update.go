@@ -89,6 +89,37 @@ type setLabelResultMsg struct {
 	err error
 }
 
+// pollsMsg carries the result of a listpolls fetch (the whole list). It echoes
+// back the includeFinished scope the request was issued with so the handler can
+// drop a stale reply: if the user toggles all/active (or refreshes) while a
+// previous listpolls is still in flight, an older response could otherwise
+// overwrite a newer view and desync the title/footer from the rows.
+type pollsMsg struct {
+	includeFinished bool
+	polls           []Poll
+	err             error
+}
+
+// pollResultMsg carries one lazily-fetched getpollresults tally, tagged with
+// the poll ID it belongs to so the handler can slot it into the cache even if
+// the cursor has since moved on.
+type pollResultMsg struct {
+	id     string
+	result PollResult
+	err    error
+}
+
+// pollSettleMsg fires a short time after the poll cursor last moved. It carries
+// the poll ID that was selected when the timer was armed; the handler only
+// starts that poll's tally if the cursor is still on it. This debounces the
+// heavy getpollresults call so scrolling past polls doesn't queue one per row.
+type pollSettleMsg struct{ id string }
+
+// pollSettleDelay is how long the cursor must rest on a poll before its tally is
+// fetched. Short enough to feel instant when you stop, long enough to skip
+// polls you scroll straight through.
+const pollSettleDelay = 350 * time.Millisecond
+
 // spinnerTickMsg fires on a timer (every spinnerInterval) while the refresh
 // spinner is running. It is separate from tickMsg because the refresh interval
 // is seconds and the spinner frame rate is ~4 Hz.
@@ -169,6 +200,7 @@ func fetchStaking(rpc *RPCClient) tea.Cmd {
 		return stakingMsg{s, err}
 	}
 }
+
 // txRefreshDepth is how many blocks back listsinceblock holds its cursor,
 // i.e. how deep a transaction stays in the per-tick refresh window. It has to
 // exceed Gridcoin's coinstake maturity (~100 blocks on mainnet) so a stake
@@ -266,6 +298,84 @@ func validateAddr(rpc *RPCClient, addr string) tea.Cmd {
 		v, err := rpc.ValidateAddress(addr)
 		return validateMsg{v, err}
 	}
+}
+
+// fetchPolls loads the governance poll list. includeFinished maps to
+// listpolls's showfinished argument. Fired only when the polls screen is
+// opened / refreshed / toggled, never on the refresh tick.
+func fetchPolls(rpc *RPCClient, includeFinished bool) tea.Cmd {
+	return func() tea.Msg {
+		polls, err := rpc.ListPolls(includeFinished)
+		return pollsMsg{includeFinished: includeFinished, polls: polls, err: err}
+	}
+}
+
+// fetchPollResult runs the getpollresults tally for a single poll. Heavy, so
+// it's fired lazily for just the poll under the cursor (see ensurePollResult).
+func fetchPollResult(rpc *RPCClient, id string) tea.Cmd {
+	return func() tea.Msg {
+		r, err := rpc.GetPollResults(id)
+		return pollResultMsg{id: id, result: r, err: err}
+	}
+}
+
+// reloadPolls (re)loads the poll list for the current all/active scope and
+// bumps the inflight spinner. Called on open, on "r", and after a tab toggle.
+// It also clears the cached getpollresults tallies; without that,
+// ensurePollResult's cache guard would keep serving each poll's first tally and
+// newer votes would stay hidden until restart.
+func (m *Model) reloadPolls() tea.Cmd {
+	m.pollResults = make(map[string]PollResult)
+	m.pollResultPending = make(map[string]bool)
+	m.pollResultErr = make(map[string]string)
+	spin := m.bumpInflight(1)
+	return tea.Batch(fetchPolls(m.rpc, m.pollsShowFinished), spin)
+}
+
+// ensurePollResult lazily kicks off the getpollresults tally for the poll
+// under the cursor, unless it's already cached or a fetch is already in
+// flight. Returns nil (a no-op Cmd for tea.Batch) when there's nothing to do,
+// so cursor-move handlers can call it unconditionally.
+func (m *Model) ensurePollResult() tea.Cmd {
+	p := m.selectedPoll()
+	if p == nil || p.ID == "" {
+		return nil
+	}
+	if _, cached := m.pollResults[p.ID]; cached {
+		return nil
+	}
+	if m.pollResultPending[p.ID] {
+		return nil
+	}
+	m.pollResultPending[p.ID] = true
+	spin := m.bumpInflight(1)
+	return tea.Batch(fetchPollResult(m.rpc, p.ID), spin)
+}
+
+// retryPollResult clears a failed tally's error for the selected poll and asks
+// ensurePollResult to re-issue it — the detail popup's "r" key. A tally already
+// cached or in flight is left alone.
+func (m *Model) retryPollResult() tea.Cmd {
+	if p := m.selectedPoll(); p != nil {
+		delete(m.pollResultErr, p.ID)
+	}
+	return m.ensurePollResult()
+}
+
+// schedulePollSettle arms the debounce timer for the currently-selected poll.
+// Used on cursor moves and after the list loads: only once the cursor has
+// rested on a poll for pollSettleDelay does its (heavy) tally actually fire, so
+// scrolling through the list no longer kicks off a getpollresults per row.
+// Opening the detail popup with enter still fetches immediately.
+func (m *Model) schedulePollSettle() tea.Cmd {
+	p := m.selectedPoll()
+	if p == nil || p.ID == "" {
+		return nil
+	}
+	id := p.ID
+	return tea.Tick(pollSettleDelay, func(time.Time) tea.Msg {
+		return pollSettleMsg{id: id}
+	})
 }
 
 // runSend performs the send-wizard's final step: unlock the wallet (if
@@ -510,6 +620,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		spin := m.bumpInflight(1)
 		return m, tea.Batch(fetchAddrs(m.rpc), spin)
 
+	case pollsMsg:
+		m.finishFetch()
+		// Drop a reply whose scope no longer matches what the screen is now
+		// showing (the user toggled all/active while this was in flight). A
+		// newer request for the current scope is the authoritative one.
+		if msg.includeFinished != m.pollsShowFinished {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.pollsErr = msg.err.Error()
+			m.pollsLoaded = true
+			return m, nil
+		}
+		m.polls = msg.polls
+		// Order newest-first by posting date so the most recent polls are at
+		// the top. Unparseable timestamps sort as the zero time and sink to the
+		// bottom. SliceStable keeps the daemon's order among equal timestamps.
+		sort.SliceStable(m.polls, func(i, j int) bool {
+			return ParsePollTime(m.polls[i].Timestamp).After(ParsePollTime(m.polls[j].Timestamp))
+		})
+		m.pollsLoaded = true
+		m.pollsErr = ""
+		m.pollCursor = clampCursor(m.pollCursor, len(m.polls))
+		// Debounce the tally for whichever poll the cursor now rests on, so a
+		// quick reload+scroll doesn't fetch one you're about to leave.
+		return m, m.schedulePollSettle()
+
+	case pollSettleMsg:
+		// The debounce timer fired: only fetch if the cursor is still on the
+		// poll that armed it. Otherwise the user moved on and a later timer
+		// (armed by that move) will handle the new selection.
+		if p := m.selectedPoll(); p != nil && p.ID == msg.id {
+			return m, m.ensurePollResult()
+		}
+		return m, nil
+
+	case pollResultMsg:
+		m.finishFetch()
+		delete(m.pollResultPending, msg.id)
+		if msg.err != nil {
+			// Record the error so the detail popup can show why the tally
+			// failed (rather than a perpetual "tallying…") and offer a retry.
+			// The list row still falls back to the "N votes" count.
+			m.pollResultErr[msg.id] = msg.err.Error()
+			return m, nil
+		}
+		delete(m.pollResultErr, msg.id)
+		m.pollResults[msg.id] = msg.result
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -540,6 +700,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeHelp:
 		// The help sheet is read-only; any key dismisses it.
 		m.mode = modeDashboard
+		return m, nil
+	case modePolls:
+		return m.handlePollsKey(msg)
+	case modePollDetail:
+		switch msg.String() {
+		case "esc", "q", "enter":
+			m.mode = modePolls
+			return m, nil
+		case "r":
+			// Retry a failed tally without leaving the popup.
+			return m, m.retryPollResult()
+		}
 		return m, nil
 	}
 	// Dashboard-mode keys.
@@ -573,6 +745,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		m.openConfigModal()
 		return m, nil
+	case "p":
+		// Open the full-screen polls list and (re)load it. Lazy on purpose:
+		// polls are never fetched on the refresh tick.
+		m.mode = modePolls
+		return m, m.reloadPolls()
 	case "?":
 		m.mode = modeHelp
 		return m, nil
@@ -653,6 +830,58 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// handlePollsKey drives the full-screen polls list. Navigation is
+// self-contained (it moves m.pollCursor directly rather than going through
+// focusedList, which only knows the dashboard's tx/address panels). Every
+// cursor move returns ensurePollResult() so the lazy tally for the newly
+// selected poll starts fetching.
+func (m Model) handlePollsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Cases that don't just move the cursor return early. The remaining
+	// movement keys share one clamp + ensurePollResult tail, so they only set a
+	// target and fall through. clampCursor pins the target to [0, len-1], so
+	// g/G (0 and len-1) fold in without special-casing.
+	target := m.pollCursor
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = modeDashboard
+		return m, nil
+	case "r":
+		return m, m.reloadPolls()
+	case "tab":
+		// Toggle between all polls (incl. finished) and active only, then
+		// reload. Reset the cursor since the row set changes.
+		m.pollsShowFinished = !m.pollsShowFinished
+		m.pollCursor = 0
+		return m, m.reloadPolls()
+	case "enter":
+		// Open the detail popup for the selected poll. Its tally was usually
+		// fetched already when the cursor landed here, but ensurePollResult also
+		// (re)starts it if the list prefetch hasn't run or a prior attempt
+		// errored — a no-op when the tally is cached or already in flight.
+		if m.selectedPoll() == nil {
+			return m, nil
+		}
+		m.mode = modePollDetail
+		return m, m.ensurePollResult()
+	case "up", "k":
+		target = m.pollCursor - 1
+	case "down", "j":
+		target = m.pollCursor + 1
+	case "pgup", "ctrl+u":
+		target = m.pollCursor - pageSize
+	case "pgdown", "ctrl+d":
+		target = m.pollCursor + pageSize
+	case "g", "home":
+		target = 0
+	case "G", "end":
+		target = len(m.polls) - 1
+	default:
+		return m, nil
+	}
+	m.pollCursor = clampCursor(target, len(m.polls))
+	return m, m.schedulePollSettle()
 }
 
 // pageSize is the fixed step used by pgup/pgdn/ctrl+u/ctrl+d. Keeping it
