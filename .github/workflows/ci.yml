@@ -1,0 +1,41 @@
+name: ci
+
+# Development happens on dev; release.yml only fires on master, so without
+# this the first feedback on a change would be the release itself.
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+
+permissions:
+  contents: read
+
+# Pushing again makes an in-flight run obsolete — don't pay for both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+      # The same gate release.yml runs, just earlier: a binary that outgrew
+      # maxDownloadBytes surfaces on dev instead of blocking a release.
+      - name: Check binaries fit the self-update download cap
+        run: scripts/check-download-cap.sh
