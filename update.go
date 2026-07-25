@@ -4,18 +4,18 @@
 //
 // Key Bubble Tea concepts used here:
 //
-//   tea.Msg  — any value that describes "something happened". Can be a
-//              keystroke (tea.KeyMsg), a window resize (tea.WindowSizeMsg),
-//              a timer firing (tickMsg we define below), or the result of
-//              an RPC call (walletMsg, txsMsg, etc.)
+//	tea.Msg  — any value that describes "something happened". Can be a
+//	           keystroke (tea.KeyMsg), a window resize (tea.WindowSizeMsg),
+//	           a timer firing (tickMsg we define below), or the result of
+//	           an RPC call (walletMsg, txsMsg, etc.)
 //
-//   tea.Cmd  — a function that returns a Msg. Bubble Tea runs Cmds in
-//              goroutines for us, so the TUI never blocks. When the Cmd
-//              returns, its Msg is delivered back to Update.
+//	tea.Cmd  — a function that returns a Msg. Bubble Tea runs Cmds in
+//	           goroutines for us, so the TUI never blocks. When the Cmd
+//	           returns, its Msg is delivered back to Update.
 //
-//   Update(msg) returns (Model, Cmd) — the new state and a follow-up Cmd
-//              to run (or nil for none). tea.Batch runs several Cmds
-//              concurrently; tea.Tick schedules a Msg for the future.
+//	Update(msg) returns (Model, Cmd) — the new state and a follow-up Cmd
+//	           to run (or nil for none). tea.Batch runs several Cmds
+//	           concurrently; tea.Tick schedules a Msg for the future.
 //
 // So a typical cycle looks like:
 //   1. tickMsg arrives → Update returns (m, Batch(fetchWallet, fetchTxs,…))
@@ -114,6 +114,28 @@ type pollResultMsg struct {
 // starts that poll's tally if the cursor is still on it. This debounces the
 // heavy getpollresults call so scrolling past polls doesn't queue one per row.
 type pollSettleMsg struct{ id string }
+
+// updateCheckMsg carries the result of a GitHub "latest release" query. One
+// message type serves both callers: the silent background check (updates the
+// header badge) and the modal's live check (also advances the modal step).
+// manual distinguishes the two: only a manual (u-key) check may drive the modal
+// state machine, so a background check that races with it — and especially a
+// background *error* — can never flip the modal to a false "failed".
+type updateCheckMsg struct {
+	rel    releaseInfo
+	err    error
+	manual bool
+}
+
+// updateInstallMsg carries the result of the download+verify+swap. newExe is
+// the path to re-exec on success.
+type updateInstallMsg struct {
+	newExe string
+	err    error
+}
+
+// updateTickMsg fires on the long background update-check interval.
+type updateTickMsg time.Time
 
 // pollSettleDelay is how long the cursor must rest on a poll before its tally is
 // fetched. Short enough to feel instant when you stop, long enough to skip
@@ -428,6 +450,31 @@ func runSetLabel(rpc *RPCClient, addr, label string) tea.Cmd {
 	}
 }
 
+// checkUpdateCmd queries GitHub for the latest release. It runs on a goroutine
+// like every other Cmd; the short HTTP timeout in fetchLatestRelease keeps a
+// blocked network from wedging the loop. Note it does NOT touch m.inflight —
+// the update flow is intentionally separate from the RPC refresh spinner so a
+// silent background check never makes the dashboard footer flash "refreshing".
+func checkUpdateCmd(manual bool) tea.Cmd {
+	return func() tea.Msg {
+		rel, err := fetchLatestRelease(updateAPIBase)
+		return updateCheckMsg{rel: rel, err: err, manual: manual}
+	}
+}
+
+// runUpdate downloads, verifies and swaps the binary for the given release.
+func runUpdate(rel releaseInfo) tea.Cmd {
+	return func() tea.Msg {
+		newExe, err := applyUpdate(rel)
+		return updateInstallMsg{newExe: newExe, err: err}
+	}
+}
+
+// updateTickCmd schedules the next background update check.
+func (m *Model) updateTickCmd() tea.Cmd {
+	return tea.Tick(updateCheckInterval, func(t time.Time) tea.Msg { return updateTickMsg(t) })
+}
+
 // ---- Init / Update ----------------------------------------------------
 
 // Init is called once when the program starts. Whatever Cmd it returns is
@@ -435,7 +482,13 @@ func runSetLabel(rpc *RPCClient, addr, label string) tea.Cmd {
 // the initial RPC fetches, and the spinner loop (which will self-stop
 // once all five fetches land because NewModel pre-seeded inflight=5).
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.tickCmd(), m.refreshAllCmd(), spinnerTickCmd())
+	cmds := []tea.Cmd{m.tickCmd(), m.refreshAllCmd(), spinnerTickCmd()}
+	if !m.cfg.NoUpdateCheck {
+		// Fire one (silent, non-manual) check shortly after launch, and arm the
+		// periodic re-check.
+		cmds = append(cmds, checkUpdateCmd(false), m.updateTickCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update is the core of the Elm architecture: input message → new state +
@@ -670,6 +723,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pollResults[msg.id] = msg.result
 		return m, nil
 
+	case updateTickMsg:
+		// Long-interval background re-check. Re-arm the timer and fire another
+		// silent check (respecting a late opt-out, though Init won't arm this
+		// when NoUpdateCheck is set).
+		if m.cfg.NoUpdateCheck {
+			return m, nil
+		}
+		return m, tea.Batch(m.updateTickCmd(), checkUpdateCmd(false))
+
+	case updateCheckMsg:
+		if msg.err != nil {
+			// Only a manual check may surface a failure in the modal. A racing
+			// background error must never flip a manual check the user is
+			// waiting on to "failed" — the manual success would then be unable
+			// to recover the modal (its advance only fires from "checking").
+			if msg.manual && m.mode == modeUpdate && m.update.step == updateStepChecking {
+				m.update.step = updateStepFailed
+				m.update.errMsg = msg.err.Error()
+			}
+			return m, nil
+		}
+		// Any successful check — manual or background — refreshes the badge and
+		// the cached release used by the install step.
+		m.update.rel = msg.rel
+		m.latestVersion = strings.TrimPrefix(msg.rel.TagName, "v")
+		m.updateAvailable = isNewer(msg.rel.TagName, version)
+		// Only a manual check drives the modal, and only from its "checking"
+		// state. That ignores a background check landing while the user reads
+		// the changelog or is mid-install, so it can't yank the view around.
+		if msg.manual && m.mode == modeUpdate && m.update.step == updateStepChecking {
+			if m.updateAvailable || version == "dev" {
+				m.update.step = updateStepAvailable
+			} else {
+				m.update.step = updateStepUpToDate
+			}
+		}
+		return m, nil
+
+	case updateInstallMsg:
+		if msg.err != nil {
+			m.update.step = updateStepFailed
+			m.update.errMsg = msg.err.Error()
+			return m, nil
+		}
+		// Binary swapped. Record the path and quit; main.go re-execs it after
+		// Bubble Tea restores the terminal.
+		m.restartExe = msg.newExe
+		return m, tea.Quit
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -713,6 +815,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.retryPollResult()
 		}
 		return m, nil
+	case modeUpdate:
+		return m.handleUpdateKey(msg)
 	}
 	// Dashboard-mode keys.
 	switch msg.String() {
@@ -745,6 +849,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		m.openConfigModal()
 		return m, nil
+	case "u":
+		// Open the Updates modal and always kick off a fresh check — this is
+		// also the manual "check now", so pressing u never shows a stale result.
+		m.mode = modeUpdate
+		m.update.step = updateStepChecking
+		m.update.errMsg = ""
+		return m, checkUpdateCmd(true)
 	case "p":
 		// Open the full-screen polls list and (re)load it. Lazy on purpose:
 		// polls are never fetched on the refresh tick.
@@ -830,6 +941,36 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// handleUpdateKey drives the self-update modal. The current step decides which
+// keys do what: while a check or install is in flight most keys are inert so a
+// stray keystroke can't interrupt it.
+func (m Model) handleUpdateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.update.step {
+	case updateStepInstalling:
+		// Don't let any keystroke interrupt an in-flight download/swap.
+		return m, nil
+	case updateStepAvailable:
+		switch msg.String() {
+		case "y", "enter":
+			m.update.step = updateStepInstalling
+			m.update.errMsg = ""
+			return m, runUpdate(m.update.rel)
+		case "n", "esc", "q":
+			m.mode = modeDashboard
+		}
+		return m, nil
+	default:
+		// checking / upToDate / failed: esc/q/enter closes; other keys ignored.
+		// Closing during a check is fine — the goroutine still finishes and
+		// updates the badge; it just no longer has a modal to advance.
+		switch msg.String() {
+		case "esc", "q", "enter":
+			m.mode = modeDashboard
+		}
+		return m, nil
+	}
 }
 
 // handlePollsKey drives the full-screen polls list. Navigation is

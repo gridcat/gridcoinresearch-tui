@@ -28,6 +28,12 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      # Runs before semantic-release tags anything and before GoReleaser builds
+      # anything, so a binary that outgrew maxDownloadBytes aborts the release
+      # instead of shipping an update nobody can install.
+      - name: Check binaries fit the self-update download cap
+        run: scripts/check-download-cap.sh
+
       - name: Semantic Release
         id: semrel
         uses: go-semantic-release/action@v1

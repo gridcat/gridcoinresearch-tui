@@ -34,6 +34,7 @@ const (
 	modeHelp                       // the keybinding / capability cheat sheet
 	modePolls                      // the full-screen governance polls list
 	modePollDetail                 // a modal showing one poll in full (opened from modePolls)
+	modeUpdate                     // the self-update modal (check → confirm → install)
 )
 
 // focusArea identifies which scrollable list on the dashboard is "active"
@@ -42,8 +43,8 @@ const (
 type focusArea int
 
 const (
-	focusTx focusArea = iota // transactions panel (default)
-	focusAddr                // My Addresses panel
+	focusTx   focusArea = iota // transactions panel (default)
+	focusAddr                  // My Addresses panel
 )
 
 // addrTab identifies which ownership filter the My Addresses panel is showing.
@@ -204,6 +205,25 @@ func (cs *configState) inputFor(f configField) *textinput.Model {
 	return nil
 }
 
+// updateStep is the state-machine step inside the self-update modal.
+type updateStep int
+
+const (
+	updateStepChecking   updateStep = iota // querying GitHub for the latest release
+	updateStepUpToDate                     // already on the latest release
+	updateStepAvailable                    // a newer release exists; awaiting confirm
+	updateStepInstalling                   // downloading + verifying + swapping the binary
+	updateStepFailed                       // the check or install errored
+)
+
+// updateState is the live state of the self-update modal. The release payload
+// is cached from the check so the confirm/install step doesn't re-fetch it.
+type updateState struct {
+	step   updateStep
+	rel    releaseInfo // the latest release from the most recent check
+	errMsg string      // populated in updateStepFailed
+}
+
 // Model is THE big state struct. Bubble Tea's program loop takes a Model,
 // calls Update on it for each incoming message, and calls View on it to
 // render a frame. Everything the UI displays — RPC data, modal state,
@@ -313,6 +333,18 @@ type Model struct {
 	pollResults       map[string]PollResult
 	pollResultPending map[string]bool
 	pollResultErr     map[string]string
+
+	// ---- Self-update ---------------------------------------------------
+	// updateAvailable + latestVersion drive the header badge; they're set by
+	// the silent background check and refreshed whenever the update modal runs
+	// its own check. update holds the modal's own state machine.
+	updateAvailable bool
+	latestVersion   string // newest release tag, "v" stripped, for display
+	update          updateState
+	// restartExe is set to the on-disk path of the freshly-installed binary
+	// when a self-update succeeds. main.go reads it after the TUI exits and
+	// re-execs that path so the user lands back in the running app.
+	restartExe string
 
 	// Modal sub-states. Only one modal is active at a time, but keeping
 	// both fields means we preserve state if the user hits esc and comes

@@ -90,8 +90,21 @@ func main() {
 	// the TUI owns the whole window while it runs and the user's previous
 	// shell output reappears intact on exit.
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
 		os.Exit(1)
+	}
+
+	// If the user ran a self-update, the final model carries the path of the
+	// freshly-installed binary. Bubble Tea has now restored the terminal (it
+	// does that as p.Run returns), so it's safe to re-exec into the new version
+	// — the user lands right back in the running app. On Unix restartExec
+	// replaces this process and never returns; on Windows it spawns + exits.
+	if fm, ok := finalModel.(Model); ok && fm.restartExe != "" {
+		if err := restartExec(fm.restartExe, os.Args, os.Environ()); err != nil {
+			fmt.Fprintln(os.Stderr, "restart:", err)
+			os.Exit(1)
+		}
 	}
 }

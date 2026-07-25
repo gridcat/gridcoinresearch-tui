@@ -44,6 +44,10 @@ type Config struct {
 	ConfPath    string // the conf file we actually read (for display in the config panel); "" if none
 	NetworkName string // "mainnet" or "testnet" — handy for rendering
 	DebugLog    string // --debug-log path; "" disables. Stderr (crash dumps) is redirected here at startup.
+	// NoUpdateCheck disables the background GitHub release check (and thus the
+	// header "update available" badge). It does NOT disable the manual check
+	// behind the "u" key — that's an explicit, user-initiated action.
+	NoUpdateCheck bool
 }
 
 // URL builds the JSON-RPC endpoint. Method receivers with a lowercase name
@@ -85,6 +89,7 @@ func LoadConfig(args []string) (Config, error) {
 		confFlag     = flags.String("conf", "", "path to gridcoinresearch.conf (optional)")
 		refreshFlag  = flags.Duration("refresh", defaultRefresh, "refresh interval")
 		debugLogFlag = flags.String("debug-log", "", "redirect stderr (Go crash dumps) to this file for debugging")
+		noUpdateFlag = flags.Bool("no-update-check", false, "disable the background check for new releases on GitHub")
 	)
 
 	if err := flags.Parse(args); err != nil {
@@ -99,6 +104,14 @@ func LoadConfig(args []string) (Config, error) {
 		Testnet:  *testnet,
 		Refresh:  *refreshFlag,
 		DebugLog: *debugLogFlag,
+	}
+	// Opt out of the background update check via flag or GRC_NO_UPDATE_CHECK.
+	// The env var accepts the common truthy spellings; anything else (including
+	// unset or an explicit "0"/"false") leaves the check enabled.
+	cfg.NoUpdateCheck = *noUpdateFlag
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GRC_NO_UPDATE_CHECK"))) {
+	case "1", "true", "yes", "on":
+		cfg.NoUpdateCheck = true
 	}
 	if cfg.Testnet {
 		cfg.NetworkName = "testnet"
