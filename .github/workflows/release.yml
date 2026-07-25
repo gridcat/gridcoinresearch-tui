@@ -15,18 +15,24 @@ jobs:
       version: ${{ steps.semrel.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: "1.25"
           cache: true
 
       - name: Run tests
         run: go test ./...
+
+      # Runs before semantic-release tags anything and before GoReleaser builds
+      # anything, so a binary that outgrew maxDownloadBytes aborts the release
+      # instead of shipping an update nobody can install.
+      - name: Check binaries fit the self-update download cap
+        run: scripts/check-download-cap.sh
 
       - name: Semantic Release
         id: semrel
@@ -45,7 +51,7 @@ jobs:
 
       - name: Run GoReleaser
         if: steps.semrel.outputs.version != ''
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"

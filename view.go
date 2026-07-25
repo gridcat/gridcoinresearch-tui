@@ -134,6 +134,8 @@ func (m Model) View() string {
 		return m.renderPollsScreen()
 	case modePollDetail:
 		return m.renderPollDetailModal()
+	case modeUpdate:
+		return m.renderUpdateModal()
 	}
 	return m.renderDashboard()
 }
@@ -250,15 +252,28 @@ func (m Model) renderHeader() string {
 		blockInfo = styleMuted.Render("block " + groupThousandsInt64(m.chain.Blocks))
 	}
 
+	// Right side shows block height, and — when a newer release is out — a
+	// green "⬆ vX.Y.Z" badge advertising the "u" key (the note the user asked
+	// for). Suppressed on dev builds and when --no-update-check is set.
+	rightSide := blockInfo
+	if m.updateAvailable && m.latestVersion != "" {
+		badge := styleGood.Render("⬆ v" + m.latestVersion)
+		if rightSide != "" {
+			rightSide = lipgloss.JoinHorizontal(lipgloss.Top, badge, "  ", rightSide)
+		} else {
+			rightSide = badge
+		}
+	}
+
 	leftHalf := lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", networkBadge)
-	gap := m.width - lipgloss.Width(leftHalf) - lipgloss.Width(blockInfo) - 4
+	gap := m.width - lipgloss.Width(leftHalf) - lipgloss.Width(rightSide) - 4
 	if gap < 1 {
 		gap = 1
 	}
 	line := lipgloss.JoinHorizontal(lipgloss.Top,
 		leftHalf,
 		strings.Repeat(" ", gap),
-		blockInfo,
+		rightSide,
 	)
 
 	return styleBorder.Width(m.width - 2).Render(line)
@@ -1058,6 +1073,7 @@ func (m Model) renderFooter() string {
 	keys = append(keys,
 		"[p]olls",
 		"[c]onfig",
+		"[u]pdate",
 		"[r]efresh",
 		anonLabel,
 		"[tab] switch panel",
@@ -1350,6 +1366,73 @@ func (m Model) renderTxDetailModal() string {
 // key grouped by what it does, with a short plain-language note on each, plus a
 // one-line summary of what the dashboard is. Any key closes it (handled in
 // update.go::handleKey, case modeHelp).
+// displayVersion is the build version for the UI, with "dev" spelled out so a
+// local build reads clearly rather than showing a bare "dev".
+func displayVersion() string {
+	if version == "dev" {
+		return "dev build"
+	}
+	return "v" + version
+}
+
+// clampChangelog trims an over-long changelog so the modal keeps a sane height
+// and the confirm keys never get pushed off screen. A single version's notes
+// are normally a few lines; this only bites on an unusually chatty release.
+func clampChangelog(s string) string {
+	const maxLines = 12
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) > maxLines {
+		lines = append(lines[:maxLines], styleMuted.Render("… (see the release page for the rest)"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderUpdateModal draws the self-update flow: a live check, then either
+// "up to date" or a changelog + confirm, then an install progress line. The
+// changelog is the original release notes with the on-chain stamp section
+// stripped (see trimStampSection).
+func (m Model) renderUpdateModal() string {
+	var body string
+	switch m.update.step {
+	case updateStepChecking:
+		body = styleMuted.Render("Checking GitHub for a newer release…")
+	case updateStepUpToDate:
+		body = styleGood.Render("✓ You're on the latest version") + "\n\n" +
+			styleMuted.Render("Current: "+displayVersion()) + "\n\n" +
+			styleMuted.Render("[esc] close")
+	case updateStepAvailable:
+		latest := "v" + strings.TrimPrefix(m.update.rel.TagName, "v")
+		body = "Current " + displayVersion() + "  →  " + styleGood.Render(latest) + "\n\n"
+		changelog := trimStampSection(m.update.rel.Body)
+		if changelog == "" {
+			changelog = styleMuted.Render("(no release notes)")
+		} else {
+			changelog = clampChangelog(changelog)
+		}
+		body += styleTitle.Render("What changed") + "\n" + changelog + "\n\n"
+		body += styleWarn.Render("Downloads and replaces the binary, then restarts the TUI.") + "\n\n"
+		body += styleMuted.Render("[y] Update & restart   [n] Cancel")
+	case updateStepInstalling:
+		body = styleMuted.Render("Downloading and installing…") + "\n\n" +
+			styleMuted.Render("The TUI will restart automatically when it's done.")
+	case updateStepFailed:
+		body = styleBad.Render("Update failed") + "\n\n" + m.update.errMsg + "\n\n" +
+			styleMuted.Render("[esc] close")
+	}
+
+	modalWidth := 64
+	if max := m.width - 4; modalWidth > max && max > 0 {
+		modalWidth = max
+	}
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(modalWidth).
+		Render(styleTitle.Render("Updates") + "\n\n" + body)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
 func (m Model) renderHelpModal() string {
 	// keyRow renders one "keys → what they do" line: the keys in the accent
 	// colour in a fixed-width column so the descriptions line up.
@@ -1384,6 +1467,7 @@ func (m Model) renderHelpModal() string {
 		keyRow("m", "Sign a message with one of your addresses"),
 		keyRow("p", "Browse on-chain governance polls (tab: all / active)"),
 		keyRow("c", "Change host, port, login, or refresh for this session"),
+		keyRow("u", "Check GitHub for a newer release and update in place"),
 		keyRow("a", "Hide every amount on screen, handy when sharing"),
 		keyRow("r", "Refresh now instead of waiting for the next poll"),
 		keyRow("? q", "This help; q quits (also Ctrl+C)"),
