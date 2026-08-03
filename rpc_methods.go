@@ -25,6 +25,16 @@ func (c *RPCClient) GetBlockchainInfo() (BlockchainInfo, error) {
 	return b, err
 }
 
+// GetPeerInfo returns one entry per connected peer. Feeds the header's
+// "peers N (x↓/y↑)" fragment; getpeerinfo is the only RPC that exposes the
+// per-peer inbound flag needed for the in/out split (getconnectioncount and
+// getinfo only carry a total).
+func (c *RPCClient) GetPeerInfo() ([]PeerInfo, error) {
+	var out []PeerInfo
+	err := c.Call("getpeerinfo", nil, &out)
+	return out, err
+}
+
 // GetStakingInfo feeds the staking badge + difficulty column in the stats panel.
 func (c *RPCClient) GetStakingInfo() (StakingInfo, error) {
 	var s StakingInfo

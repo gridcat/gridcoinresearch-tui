@@ -28,85 +28,254 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// Colour palette. lipgloss.Color accepts any 256-colour terminal code as a
+// Colour scheme. lipgloss.Color accepts any 256-colour terminal code as a
 // decimal string, and the terminal renders it via ANSI SGR. Where the
 // terminal doesn't support colour, lipgloss strips the escape sequences.
-var (
-	colorBorder      = lipgloss.Color("240")
-	colorMuted       = lipgloss.Color("244")
-	colorLabel       = lipgloss.Color("250")
-	colorValue       = lipgloss.Color("255")
-	colorGood        = lipgloss.Color("42")  // green
-	colorWarn        = lipgloss.Color("214") // orange
-	colorBad         = lipgloss.Color("203") // red
-	colorMainnet     = lipgloss.Color("42")
-	colorTestnet     = lipgloss.Color("214")
-	colorAccent      = lipgloss.Color("75")
-	colorRowSelected = lipgloss.Color("236") // highlight background for the selected row
+//
+// A scheme is a palette value plus an entry in the schemes map below. Nothing
+// else needs touching to add one: buildStyles consumes the palette generically,
+// so every style picks the new colours up automatically.
+type palette struct {
+	border      lipgloss.Color
+	muted       lipgloss.Color
+	label       lipgloss.Color
+	value       lipgloss.Color
+	title       lipgloss.Color
+	accent      lipgloss.Color
+	rowSelected lipgloss.Color // highlight background for the selected row
 
+	// Status colours. A scheme is free to restyle these to fit its palette,
+	// but the three must stay clearly distinguishable from each other and from
+	// the chrome: they are the only cue for state rather than decoration, so
+	// "staking ● yes" must never be mistakable for an error.
+	good lipgloss.Color
+	warn lipgloss.Color
+	bad  lipgloss.Color
+
+	// Network badge colours, used by the header's "● mainnet" / "● testnet".
+	mainnet lipgloss.Color
+	testnet lipgloss.Color
+}
+
+// schemes holds every selectable colour scheme. Add a scheme by adding an
+// entry here and pointing something at its name.
+var schemes = map[string]palette{
+	// "default" is the original neutral look: grey chrome, blue accent.
+	"default": {
+		border:      lipgloss.Color("240"),
+		muted:       lipgloss.Color("244"),
+		label:       lipgloss.Color("250"),
+		value:       lipgloss.Color("255"),
+		title:       lipgloss.Color("255"),
+		accent:      lipgloss.Color("75"), // blue
+		rowSelected: lipgloss.Color("236"),
+		good:        lipgloss.Color("42"),  // green
+		warn:        lipgloss.Color("214"), // orange
+		bad:         lipgloss.Color("203"), // red
+		mainnet:     lipgloss.Color("42"),
+		testnet:     lipgloss.Color("214"),
+	},
+
+	// "orange" is the testnet look, matching the orange-for-testnet convention
+	// the *.gridcoin.club frontends use so a testnet window is unmistakable
+	// among mainnet ones. The warm neutrals form a deliberate ramp — muted 137
+	// < border 172 < label 180 < accent 208 < title 214 < value 230 — so text
+	// hierarchy survives even though nearly everything is orange.
+	//
+	// The status colours are warmed too rather than left green/red, so nothing
+	// on screen breaks the theme. They stay mutually distinct by hue instead of
+	// by temperature: yellow 184 (good) / orange 214 (warn) / red-orange 202
+	// (bad) still reads as a traffic light, just a warm one.
+	"orange": {
+		border:      lipgloss.Color("172"),
+		muted:       lipgloss.Color("137"),
+		label:       lipgloss.Color("180"),
+		value:       lipgloss.Color("230"),
+		title:       lipgloss.Color("214"), // ~ family testnet primary #ef6c00
+		accent:      lipgloss.Color("208"),
+		rowSelected: lipgloss.Color("58"),
+		good:        lipgloss.Color("184"), // yellow
+		warn:        lipgloss.Color("214"), // orange
+		bad:         lipgloss.Color("202"), // red-orange
+		mainnet:     lipgloss.Color("184"),
+		testnet:     lipgloss.Color("214"),
+	},
+}
+
+// Live colours, assigned by applyPalette. A few render paths read these
+// directly rather than through a style (BorderForeground on modal boxes, the
+// selected-row background), so they have to stay in sync with the styles.
+var (
+	colorBorder      lipgloss.Color
+	colorMuted       lipgloss.Color
+	colorLabel       lipgloss.Color
+	colorValue       lipgloss.Color
+	colorGood        lipgloss.Color
+	colorWarn        lipgloss.Color
+	colorBad         lipgloss.Color
+	colorMainnet     lipgloss.Color
+	colorTestnet     lipgloss.Color
+	colorAccent      lipgloss.Color
+	colorRowSelected lipgloss.Color
+)
+
+// Styles built from the live colours. These are assigned by buildStyles, NOT
+// at declaration: a style captures its colour by value, so one built at
+// declaration time would keep the first scheme's colours forever.
+//
+// Anything here that captures a colour must be (re)built in buildStyles.
+// Colour-free styles live in the plain var block further down.
+var (
 	// styleBorder is the rounded-corner box used for every panel on the
 	// dashboard. Padding(0, 1) inserts one column of horizontal breathing
 	// room inside the border on each side.
-	styleBorder = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorBorder).
-			Padding(0, 1)
-
-	styleLabel  = lipgloss.NewStyle().Foreground(colorLabel)
-	styleValue  = lipgloss.NewStyle().Foreground(colorValue).Bold(true)
-	styleMuted  = lipgloss.NewStyle().Foreground(colorMuted)
-	styleGood   = lipgloss.NewStyle().Foreground(colorGood)
-	styleWarn   = lipgloss.NewStyle().Foreground(colorWarn)
-	styleBad    = lipgloss.NewStyle().Foreground(colorBad)
-	styleAccent = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	styleTitle  = lipgloss.NewStyle().Foreground(colorValue).Bold(true)
+	styleBorder lipgloss.Style
 
 	// styleBorderFocused is the same rounded box but painted with the
 	// accent colour so the user can tell at a glance which panel arrow
 	// keys will operate on.
-	styleBorderFocused = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(colorAccent).
-				Padding(0, 1)
+	styleBorderFocused lipgloss.Style
 
-	styleMainnetBadge = lipgloss.NewStyle().Foreground(colorMainnet).Bold(true)
-	styleTestnetBadge = lipgloss.NewStyle().Foreground(colorTestnet).Bold(true)
+	styleLabel  lipgloss.Style
+	styleValue  lipgloss.Style
+	styleMuted  lipgloss.Style
+	styleGood   lipgloss.Style
+	styleWarn   lipgloss.Style
+	styleBad    lipgloss.Style
+	styleAccent lipgloss.Style
+	styleTitle  lipgloss.Style
 
-	styleStatLabelA = styleLabel.Width(14)
-	styleStatLabelB = styleLabel.Width(12)
-	styleStatValueA = lipgloss.NewStyle().Width(22)
+	styleMainnetBadge lipgloss.Style
+	styleTestnetBadge lipgloss.Style
 
-	styleTxStatusCol = lipgloss.NewStyle().Width(10).Foreground(colorLabel)
-	styleTxAmountCol = lipgloss.NewStyle().Width(18).Align(lipgloss.Right)
-	styleTxAddrCol   = lipgloss.NewStyle().Width(16)
-	styleTxTimeCol   = lipgloss.NewStyle().Width(12)
+	styleStatLabelA lipgloss.Style
+	styleStatLabelB lipgloss.Style
+
+	styleTxStatusCol lipgloss.Style
 
 	// Poll list columns. Title has no fixed width — it flexes to fill whatever
 	// these three fixed columns leave (see renderPollRow), so the row spans the
 	// full damn panel and the title gets the most room. The stat column holds
 	// either the cheap "N votes" count or, once the lazy tally lands, the "62% Yes"
 	// participation + leading answer.
-	stylePollWeightCol = lipgloss.NewStyle().Width(6).Foreground(colorMuted)
-	stylePollStatCol   = lipgloss.NewStyle().Width(22).Foreground(colorMuted)
-	stylePollTimeCol   = lipgloss.NewStyle().Width(8).Align(lipgloss.Right).Foreground(colorMuted)
+	stylePollWeightCol lipgloss.Style
+	stylePollStatCol   lipgloss.Style
+	stylePollTimeCol   lipgloss.Style
+
+	// txKindStyle maps the status enum defined in format.go to the lipgloss
+	// colour we want its icon rendered in. Package-level map so renderTxRow
+	// doesn't build one on each frame.
+	txKindStyle map[TxStatusKind]lipgloss.Style
+
+	configLabelStyle   lipgloss.Style
+	configLabelFocused lipgloss.Style
+	configValueFocused lipgloss.Style
 )
 
-// txKindStyle maps the status enum defined in format.go to the lipgloss
-// colour we want its icon rendered in. Package-level map so renderTxRow
-// doesn't build one on each frame.
-var txKindStyle = map[TxStatusKind]lipgloss.Style{
-	TxStatusUpcoming:  styleWarn,
-	TxStatusIncoming:  styleAccent,
-	TxStatusSending:   styleAccent,
-	TxStatusConfirmed: styleGood,
-	TxStatusStake:     styleAccent,
+// Styles with no colour of their own — layout only, so they are scheme
+// independent and safe to build once at declaration.
+var (
+	styleStatValueA = lipgloss.NewStyle().Width(22)
+
+	styleTxAmountCol = lipgloss.NewStyle().Width(18).Align(lipgloss.Right)
+	styleTxAddrCol   = lipgloss.NewStyle().Width(16)
+	styleTxTimeCol   = lipgloss.NewStyle().Width(12)
+)
+
+func init() { applyScheme(defaultScheme) }
+
+const (
+	defaultScheme = "default"
+	testnetScheme = "orange"
+)
+
+// applyScheme repaints everything from the named scheme, falling back to the
+// default if the name is unknown so a bad name degrades to a plain UI instead
+// of a blank one.
+func applyScheme(name string) {
+	p, ok := schemes[name]
+	if !ok {
+		p = schemes[defaultScheme]
+	}
+	applyPalette(p)
 }
 
-var (
-	configLabelStyle   = styleLabel.Width(12)
+// applyNetworkPalette selects the scheme for the network we're pointed at.
+// Colour is what makes a testnet window recognisable at a glance among
+// mainnet ones in a row of tmux panes.
+func applyNetworkPalette(testnet bool) {
+	if testnet {
+		applyScheme(testnetScheme)
+		return
+	}
+	applyScheme(defaultScheme)
+}
+
+// applyPalette publishes a palette to the live colours and rebuilds every
+// style from them. Safe to call repeatedly and in any order — it assigns all
+// state unconditionally rather than mutating in place, so the config modal can
+// toggle schemes at runtime without a restart.
+func applyPalette(p palette) {
+	colorBorder = p.border
+	colorMuted = p.muted
+	colorLabel = p.label
+	colorValue = p.value
+	colorAccent = p.accent
+	colorRowSelected = p.rowSelected
+	colorGood = p.good
+	colorWarn = p.warn
+	colorBad = p.bad
+	colorMainnet = p.mainnet
+	colorTestnet = p.testnet
+	buildStyles(p)
+}
+
+// buildStyles rebuilds every style that captures a colour. Adding a coloured
+// style means adding it here too, otherwise it silently keeps whichever
+// scheme happened to be active when it was first built.
+func buildStyles(p palette) {
+	styleBorder = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.border).
+		Padding(0, 1)
+	styleBorderFocused = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.accent).
+		Padding(0, 1)
+
+	styleLabel = lipgloss.NewStyle().Foreground(p.label)
+	styleValue = lipgloss.NewStyle().Foreground(p.value).Bold(true)
+	styleMuted = lipgloss.NewStyle().Foreground(p.muted)
+	styleGood = lipgloss.NewStyle().Foreground(p.good)
+	styleWarn = lipgloss.NewStyle().Foreground(p.warn)
+	styleBad = lipgloss.NewStyle().Foreground(p.bad)
+	styleAccent = lipgloss.NewStyle().Foreground(p.accent).Bold(true)
+	styleTitle = lipgloss.NewStyle().Foreground(p.title).Bold(true)
+
+	styleMainnetBadge = lipgloss.NewStyle().Foreground(p.mainnet).Bold(true)
+	styleTestnetBadge = lipgloss.NewStyle().Foreground(p.testnet).Bold(true)
+
+	styleStatLabelA = styleLabel.Width(14)
+	styleStatLabelB = styleLabel.Width(12)
+
+	styleTxStatusCol = lipgloss.NewStyle().Width(10).Foreground(p.label)
+
+	stylePollWeightCol = lipgloss.NewStyle().Width(6).Foreground(p.muted)
+	stylePollStatCol = lipgloss.NewStyle().Width(22).Foreground(p.muted)
+	stylePollTimeCol = lipgloss.NewStyle().Width(8).Align(lipgloss.Right).Foreground(p.muted)
+
+	txKindStyle = map[TxStatusKind]lipgloss.Style{
+		TxStatusUpcoming:  styleWarn,
+		TxStatusIncoming:  styleAccent,
+		TxStatusSending:   styleAccent,
+		TxStatusConfirmed: styleGood,
+		TxStatusStake:     styleAccent,
+	}
+
+	configLabelStyle = styleLabel.Width(12)
 	configLabelFocused = styleAccent.Width(12)
-	configValueFocused = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-)
+	configValueFocused = lipgloss.NewStyle().Foreground(p.accent).Bold(true)
+}
 
 // View is Bubble Tea's "render a frame" hook. We dispatch to a modal
 // renderer if one is open, otherwise fall through to the main dashboard.
@@ -250,6 +419,20 @@ func (m Model) renderHeader() string {
 	blockInfo := ""
 	if m.chain.Blocks > 0 {
 		blockInfo = styleMuted.Render("block " + groupThousandsInt64(m.chain.Blocks))
+	}
+	if m.peersLoaded {
+		// Zero peers means the node is effectively offline — render just
+		// "peers 0" as a warning instead of a pointless (0↓/0↑) split.
+		peers := styleWarn.Render("peers 0")
+		if m.peersTotal > 0 {
+			peers = styleMuted.Render(fmt.Sprintf("peers %d (%d↓/%d↑)",
+				m.peersTotal, m.peersIn, m.peersOut))
+		}
+		if blockInfo != "" {
+			blockInfo = blockInfo + styleMuted.Render(" · ") + peers
+		} else {
+			blockInfo = peers
+		}
 	}
 
 	// Right side shows block height, and — when a newer release is out — a
@@ -1025,14 +1208,14 @@ func (m Model) renderPollDetailModal() string {
 }
 
 // renderStatusBar renders one bordered full-width bar: the key legend on the
-// left, and the refresh spinner (labelled spinnerLabel) pinned to the right
-// while any RPC fetch is in flight. Shared by the dashboard footer and the
-// polls-screen footer so their width/gap budget can't drift.
-func (m Model) renderStatusBar(keys []string, spinnerLabel string) string {
+// left, and the refresh spinner pinned to the right while any RPC fetch is in
+// flight. Shared by the dashboard footer and the polls-screen footer so their
+// width/gap budget can't drift.
+func (m Model) renderStatusBar(keys []string) string {
 	left := styleMuted.Render(strings.Join(keys, "  "))
 	right := ""
 	if m.inflight > 0 {
-		right = styleAccent.Render(spinnerFrames[m.spinnerFrame] + " " + spinnerLabel)
+		right = styleAccent.Render(spinnerFrames[m.spinnerFrame])
 	}
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
 	if gap < 1 {
@@ -1055,7 +1238,7 @@ func (m Model) renderPollsFooter() string {
 		"[↑/↓ · pgup/pgdn] scroll",
 		"[r]efresh",
 		"[esc] back",
-	}, "loading")
+	})
 }
 
 func (m Model) renderFooter() string {
@@ -1085,7 +1268,7 @@ func (m Model) renderFooter() string {
 	// flight so the user can see the TUI is alive and talking to the daemon;
 	// when all fetches settle it goes blank — a brief flash every refresh
 	// interval rather than a persistent clock.
-	return m.renderStatusBar(keys, "refreshing")
+	return m.renderStatusBar(keys)
 }
 
 func (m Model) renderSendModal() string {

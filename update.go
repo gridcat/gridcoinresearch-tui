@@ -59,6 +59,10 @@ type stakingMsg struct {
 	s   StakingInfo
 	err error
 }
+type peersMsg struct {
+	peers []PeerInfo
+	err   error
+}
 type txsMsg struct {
 	resp SinceBlockResponse
 	err  error
@@ -222,6 +226,12 @@ func fetchStaking(rpc *RPCClient) tea.Cmd {
 		return stakingMsg{s, err}
 	}
 }
+func fetchPeers(rpc *RPCClient) tea.Cmd {
+	return func() tea.Msg {
+		p, err := rpc.GetPeerInfo()
+		return peersMsg{p, err}
+	}
+}
 
 // txRefreshDepth is how many blocks back listsinceblock holds its cursor,
 // i.e. how deep a transaction stays in the per-tick refresh window. It has to
@@ -278,7 +288,7 @@ func fetchAddrOwnership(rpc *RPCClient, addrs []string) tea.Cmd {
 	}
 }
 
-// refreshAllCmd fires all five fetches SEQUENTIALLY via tea.Sequence.
+// refreshAllCmd fires all six fetches SEQUENTIALLY via tea.Sequence.
 //
 // tea.Sequence, unlike tea.Batch, runs its child Cmds one at a time and
 // waits for each to land its Msg back through Update before starting the
@@ -296,12 +306,13 @@ func (m *Model) refreshAllCmd() tea.Cmd {
 		fetchWallet(m.rpc),
 		fetchChain(m.rpc),
 		fetchStaking(m.rpc),
+		fetchPeers(m.rpc),
 		fetchTxs(m.rpc, m.txsLastBlock),
 		fetchAddrs(m.rpc),
 	)
 }
 
-// refreshCoreCmd is the serialised 4-fetch batch used on every timer
+// refreshCoreCmd is the serialised 5-fetch batch used on every timer
 // tick. Same rationale as refreshAllCmd (see its comment), but we
 // deliberately omit fetchAddrs here because ticks are supposed to be
 // lightweight; addresses refresh event-driven from the txsMsg handler
@@ -311,6 +322,7 @@ func (m *Model) refreshCoreCmd() tea.Cmd {
 		fetchWallet(m.rpc),
 		fetchChain(m.rpc),
 		fetchStaking(m.rpc),
+		fetchPeers(m.rpc),
 		fetchTxs(m.rpc, m.txsLastBlock),
 	)
 }
@@ -480,7 +492,7 @@ func (m *Model) updateTickCmd() tea.Cmd {
 // Init is called once when the program starts. Whatever Cmd it returns is
 // the first action the runtime executes — we kick off the recurring tick,
 // the initial RPC fetches, and the spinner loop (which will self-stop
-// once all five fetches land because NewModel pre-seeded inflight=5).
+// once all six fetches land because NewModel pre-seeded inflight=6).
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.tickCmd(), m.refreshAllCmd(), spinnerTickCmd()}
 	if !m.cfg.NoUpdateCheck {
@@ -513,10 +525,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inflight > 0 {
 			return m, m.tickCmd()
 		}
-		// Refresh wallet/chain/staking and tx deltas on every tick,
+		// Refresh wallet/chain/staking/peers and tx deltas on every tick,
 		// serialised via refreshCoreCmd so we only hold one RPC worker
 		// thread at a time.
-		spin := m.bumpInflight(4)
+		spin := m.bumpInflight(5)
 		return m, tea.Batch(m.tickCmd(), m.refreshCoreCmd(), spin)
 
 	case spinnerTickMsg:
@@ -556,6 +568,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.walletErr = msg.err.Error()
 		} else {
 			m.staking = msg.s
+		}
+		return m, nil
+	case peersMsg:
+		m.finishFetch()
+		if msg.err != nil {
+			m.walletErr = msg.err.Error()
+		} else {
+			m.peersTotal = len(msg.peers)
+			m.peersIn = 0
+			for _, p := range msg.peers {
+				if p.Inbound {
+					m.peersIn++
+				}
+			}
+			m.peersOut = m.peersTotal - m.peersIn
+			m.peersLoaded = true
 		}
 		return m, nil
 	case txsMsg:
@@ -824,13 +852,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "r":
 		// Anti-pileup: if a previous refresh is still running, ignore
-		// the keystroke instead of stacking another 5-fetch sequence
+		// the keystroke instead of stacking another 6-fetch sequence
 		// behind it. The spinner already tells the user a refresh is
 		// in progress.
 		if m.inflight > 0 {
 			return m, nil
 		}
-		spin := m.bumpInflight(5)
+		spin := m.bumpInflight(6)
 		return m, tea.Batch(m.refreshAllCmd(), spin)
 	case "s":
 		m.openSendModal()
@@ -1448,6 +1476,9 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	} else {
 		m.cfg.NetworkName = "mainnet"
 	}
+	// Repaint the chrome so a network toggle takes effect immediately rather
+	// than waiting for a restart.
+	applyNetworkPalette(m.cfg.Testnet)
 	m.cfg.Host = host
 	m.cfg.Port = port
 	m.cfg.User = strings.TrimSpace(m.conf.user.Value())
@@ -1462,6 +1493,7 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	m.loaded = false
 	m.txsLoaded = false
 	m.addrsLoaded = false
+	m.peersLoaded = false
 	m.txs = nil
 	m.txsLastBlock = "" // force a full re-seed against the new daemon
 	m.addresses = nil
@@ -1473,7 +1505,7 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	// on every tickMsg and never stops, so it already keeps polling at the new
 	// cfg.Refresh. Starting another would leak a second self-re-arming tick (and
 	// double the refresh rate) on every Apply.
-	spin := m.bumpInflight(5)
+	spin := m.bumpInflight(6)
 	return m, tea.Batch(m.refreshAllCmd(), spin)
 }
 

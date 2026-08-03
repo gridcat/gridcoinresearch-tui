@@ -83,6 +83,10 @@ func main() {
 		}
 	}
 
+	// Paint the chrome for the resolved network before the first frame, so a
+	// testnet window is recognisable at a glance among mainnet ones.
+	applyNetworkPalette(cfg.Testnet)
+
 	rpc := NewRPCClient(cfg)
 	m := NewModel(cfg, rpc)
 

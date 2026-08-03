@@ -242,6 +242,13 @@ type Model struct {
 	txs        []Transaction
 	addresses  []ReceivedAddress
 	lastUpdate time.Time
+	// Peer-connection counts derived from getpeerinfo (total = in + out).
+	// peersLoaded distinguishes "0 peers" (worth a warning badge) from
+	// "not fetched yet" (render nothing).
+	peersTotal  int
+	peersIn     int
+	peersOut    int
+	peersLoaded bool
 	// addrMine caches authoritative per-address ownership (validateaddress
 	// ismine). listreceivedbyaddress returns the entire address book —
 	// foreign addresses you've merely labelled included — so the My
@@ -387,13 +394,13 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 	return Model{
 		cfg: cfg,
 		rpc: rpc,
-		// Init will fire 5 fetches (wallet, chain, staking, txs, addrs)
-		// right after Bubble Tea calls Init on us. Pre-seeding inflight
-		// here means the spinner's first tick sees a positive counter
-		// and doesn't immediately stop itself. Init starts that spinner
-		// chain directly, so mark it running to keep bumpInflight's guard
-		// honest from the first frame.
-		inflight:       5,
+		// Init will fire 6 fetches (wallet, chain, staking, peers, txs,
+		// addrs) right after Bubble Tea calls Init on us. Pre-seeding
+		// inflight here means the spinner's first tick sees a positive
+		// counter and doesn't immediately stop itself. Init starts that
+		// spinner chain directly, so mark it running to keep
+		// bumpInflight's guard honest from the first frame.
+		inflight:       6,
 		spinnerRunning: true,
 		addrMine:       make(map[string]bool),
 		// Default the polls screen to "all polls" (incl. finished); tab narrows
