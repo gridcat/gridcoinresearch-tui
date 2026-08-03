@@ -69,6 +69,18 @@ export GRC_RPC_PASSWORD=mypass
 ./gridcoinresearch-tui
 ```
 
+### Telling networks apart
+
+Testnet paints the whole UI orange — borders, labels, values, the focused panel, even
+the status colours — while mainnet keeps the neutral grey-and-blue look. Same
+orange-for-testnet convention the `*.gridcoin.club` frontends use, so a testnet window
+is unmistakable in a row of tmux panes. Status colours are warmed rather than dropped:
+yellow/orange/red-orange still read as a traffic light. Toggling the network in the
+config panel repaints immediately, no restart needed.
+
+Schemes live in the `schemes` map in `view.go` — adding one is a single entry, and
+every style picks it up automatically.
+
 ### All flags
 
 | Flag | Env var | Default | Notes |

@@ -49,6 +49,14 @@ type BlockchainInfo struct {
 	InitialBlockDownload bool    `json:"initialblockdownload"`
 }
 
+// PeerInfo is one entry from getpeerinfo. The daemon returns one object per
+// connected peer with plenty of detail (address, version, ping…); the TUI
+// only needs the Inbound flag to split the header's peer count into
+// inbound/outbound, so per the file convention that's all we decode.
+type PeerInfo struct {
+	Inbound bool `json:"inbound"`
+}
+
 // StakingInfo matches getstakinginfo. Field tags that look weird (with
 // dashes) match Gridcoin's actual JSON keys — gridcoinresearchd uses
 // "mining-error" and "time-to-stake_days" rather than the camelCase you
