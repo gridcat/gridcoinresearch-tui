@@ -219,9 +219,10 @@ const (
 // updateState is the live state of the self-update modal. The release payload
 // is cached from the check so the confirm/install step doesn't re-fetch it.
 type updateState struct {
-	step   updateStep
-	rel    releaseInfo // the latest release from the most recent check
-	errMsg string      // populated in updateStepFailed
+	step           updateStep
+	rel            releaseInfo   // the latest release from the most recent check
+	missedReleases []releaseInfo // releases newer than the running version, used for changelog display
+	errMsg         string        // populated in updateStepFailed
 }
 
 // Model is THE big state struct. Bubble Tea's program loop takes a Model,

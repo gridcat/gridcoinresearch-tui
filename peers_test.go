@@ -108,3 +108,35 @@ func TestRenderHeaderPeers(t *testing.T) {
 		t.Errorf("unloaded peers should render nothing, got:\n%s", out)
 	}
 }
+
+func TestRenderHeaderVersion(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+
+	version = "1.2.3"
+	m := Model{width: 100}
+	out := m.renderHeader()
+	if !strings.Contains(out, "v1.2.3") {
+		t.Errorf("header missing current version, got:\n%s", out)
+	}
+
+	m.updateAvailable = true
+	m.latestVersion = "1.2.4"
+	out = m.renderHeader()
+	if !strings.Contains(out, "⬆") {
+		t.Errorf("header missing compact update indicator, got:\n%s", out)
+	}
+	if !strings.Contains(out, "v1.2.3") {
+		t.Errorf("header missing current version with update available, got:\n%s", out)
+	}
+	if strings.Contains(out, "v1.2.4") {
+		t.Errorf("header should not show latest version directly, got:\n%s", out)
+	}
+
+	version = "dev"
+	m = Model{width: 100}
+	out = m.renderHeader()
+	if !strings.Contains(out, "dev build") {
+		t.Errorf("header missing dev build version, got:\n%s", out)
+	}
+}

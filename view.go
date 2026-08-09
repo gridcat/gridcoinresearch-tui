@@ -435,18 +435,18 @@ func (m Model) renderHeader() string {
 		}
 	}
 
-	// Right side shows block height, and — when a newer release is out — a
-	// green "⬆ vX.Y.Z" badge advertising the "u" key (the note the user asked
-	// for). Suppressed on dev builds and when --no-update-check is set.
-	rightSide := blockInfo
+	// Right side always shows the running build version. When a newer release is
+	// out, a compact green badge advertises the "u" key without duplicating the
+	// latest version number shown in the update modal.
+	rightParts := []string{}
 	if m.updateAvailable && m.latestVersion != "" {
-		badge := styleGood.Render("⬆ v" + m.latestVersion)
-		if rightSide != "" {
-			rightSide = lipgloss.JoinHorizontal(lipgloss.Top, badge, "  ", rightSide)
-		} else {
-			rightSide = badge
-		}
+		rightParts = append(rightParts, styleGood.Render("⬆"))
 	}
+	rightParts = append(rightParts, styleMuted.Render(displayVersion()))
+	if blockInfo != "" {
+		rightParts = append(rightParts, blockInfo)
+	}
+	rightSide := strings.Join(rightParts, "  ")
 
 	leftHalf := lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", networkBadge)
 	gap := m.width - lipgloss.Width(leftHalf) - lipgloss.Width(rightSide) - 4
@@ -1570,6 +1570,22 @@ func clampChangelog(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+func renderReleaseChangelogs(releases []releaseInfo) string {
+	if len(releases) == 0 {
+		return styleMuted.Render("(no release notes)")
+	}
+	sections := make([]string, 0, len(releases))
+	for _, rel := range releases {
+		notes := trimStampSection(rel.Body)
+		if notes == "" {
+			notes = styleMuted.Render("(no release notes)")
+		}
+		version := "v" + strings.TrimPrefix(rel.TagName, "v")
+		sections = append(sections, styleTitle.Render(version)+"\n"+notes)
+	}
+	return clampChangelog(strings.Join(sections, "\n\n"))
+}
+
 // renderUpdateModal draws the self-update flow: a live check, then either
 // "up to date" or a changelog + confirm, then an install progress line. The
 // changelog is the original release notes with the on-chain stamp section
@@ -1586,13 +1602,7 @@ func (m Model) renderUpdateModal() string {
 	case updateStepAvailable:
 		latest := "v" + strings.TrimPrefix(m.update.rel.TagName, "v")
 		body = "Current " + displayVersion() + "  →  " + styleGood.Render(latest) + "\n\n"
-		changelog := trimStampSection(m.update.rel.Body)
-		if changelog == "" {
-			changelog = styleMuted.Render("(no release notes)")
-		} else {
-			changelog = clampChangelog(changelog)
-		}
-		body += styleTitle.Render("What changed") + "\n" + changelog + "\n\n"
+		body += styleTitle.Render("What changed") + "\n" + renderReleaseChangelogs(m.update.missedReleases) + "\n\n"
 		body += styleWarn.Render("Downloads and replaces the binary, then restarts the TUI.") + "\n\n"
 		body += styleMuted.Render("[y] Update & restart   [n] Cancel")
 	case updateStepInstalling:

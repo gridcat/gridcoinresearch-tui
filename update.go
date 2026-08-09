@@ -18,11 +18,11 @@
 //	           concurrently; tea.Tick schedules a Msg for the future.
 //
 // So a typical cycle looks like:
-//   1. tickMsg arrives → Update returns (m, Batch(fetchWallet, fetchTxs,…))
-//   2. fetchWallet runs in a goroutine, calls GetWalletInfo, returns
-//      walletMsg{w, err}
-//   3. Update receives walletMsg, stores m.wallet = w, returns (m, nil)
-//   4. View renders the new Model
+//  1. tickMsg arrives → Update returns (m, Batch(fetchWallet, fetchTxs,…))
+//  2. fetchWallet runs in a goroutine, calls GetWalletInfo, returns
+//     walletMsg{w, err}
+//  3. Update receives walletMsg, stores m.wallet = w, returns (m, nil)
+//  4. View renders the new Model
 package main
 
 import (
@@ -126,9 +126,10 @@ type pollSettleMsg struct{ id string }
 // state machine, so a background check that races with it — and especially a
 // background *error* — can never flip the modal to a false "failed".
 type updateCheckMsg struct {
-	rel    releaseInfo
-	err    error
-	manual bool
+	rel            releaseInfo
+	missedReleases []releaseInfo
+	err            error
+	manual         bool
 }
 
 // updateInstallMsg carries the result of the download+verify+swap. newExe is
@@ -470,7 +471,17 @@ func runSetLabel(rpc *RPCClient, addr, label string) tea.Cmd {
 func checkUpdateCmd(manual bool) tea.Cmd {
 	return func() tea.Msg {
 		rel, err := fetchLatestRelease(updateAPIBase)
-		return updateCheckMsg{rel: rel, err: err, manual: manual}
+		if err != nil {
+			return updateCheckMsg{err: err, manual: manual}
+		}
+		var releases []releaseInfo
+		if manual {
+			releases, err = fetchReleases(updateAPIBase)
+			if err != nil {
+				return updateCheckMsg{err: err, manual: manual}
+			}
+		}
+		return updateCheckMsg{rel: rel, missedReleases: missedReleases(version, rel, releases), manual: manual}
 	}
 }
 
@@ -772,11 +783,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Any successful check — manual or background — refreshes the badge and
-		// the cached release used by the install step.
-		m.update.rel = msg.rel
+		// Any successful check — manual or background — refreshes the badge.
+		// Only a manual check owns the modal payload; background checks do not
+		// fetch missed release notes and must not collapse an open changelog to
+		// latest-only while the user is reading it.
 		m.latestVersion = strings.TrimPrefix(msg.rel.TagName, "v")
 		m.updateAvailable = isNewer(msg.rel.TagName, version)
+		if msg.manual {
+			m.update.rel = msg.rel
+			m.update.missedReleases = msg.missedReleases
+			if len(m.update.missedReleases) == 0 {
+				m.update.missedReleases = missedReleases(version, msg.rel, nil)
+			}
+		}
 		// Only a manual check drives the modal, and only from its "checking"
 		// state. That ignores a background check landing while the user reads
 		// the changelog or is mid-install, so it can't yank the view around.
@@ -883,6 +902,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeUpdate
 		m.update.step = updateStepChecking
 		m.update.errMsg = ""
+		m.update.missedReleases = nil
 		return m, checkUpdateCmd(true)
 	case "p":
 		// Open the full-screen polls list and (re)load it. Lazy on purpose:
