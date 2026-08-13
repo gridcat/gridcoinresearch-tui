@@ -161,6 +161,45 @@ func ShortAddress(addr string) string {
 	return addr[:6] + "…" + addr[len(addr)-3:]
 }
 
+// sanitizeTerminal strips every rune a terminal would interpret as a command
+// rather than text: the C0 controls (U+0000–U+001F — ESC, BEL, backspace,
+// and also newline and tab, because every caller renders into a single
+// fixed-width line or field where even an innocent newline breaks the
+// layout), DEL (U+007F), and the C1 controls (U+0080–U+009F, the single-rune
+// spellings of CSI, OSC and friends). Dropped, not replaced.
+//
+// It exists because daemon-sourced strings are not just "data from our own
+// node". Poll titles, questions and answer choices are on-chain contract
+// data authored by ANY Gridcoin network participant: anyone can create a
+// poll whose title carries escape sequences, and every TUI that opens the
+// polls screen then renders them. lipgloss.Render wraps text in SGR codes
+// but does NOT strip control bytes, so without this the sequences execute in
+// the user's terminal — forged UI (hiding the "⚠ not yours" warning,
+// painting a fake unlock state, cursor-moving over already-drawn rows),
+// OSC 52 clipboard writes, or DSR/DECRQSS queries that many emulators answer
+// by writing bytes back onto our stdin, i.e. input injection.
+//
+// It is applied at the render boundary, not at JSON decode, so the model
+// always holds the daemon's bytes verbatim (txid/address comparisons and
+// cache keys stay exact) and the rule stays visible at the one place it
+// matters. Callers must sanitize BEFORE measuring or truncating: truncate()
+// budgets *display* columns and control runes have width 0, which is exactly
+// why truncation alone never protected these fields.
+//
+// strings.Map rather than a byte loop keeps this rune-aware — the C1
+// codepoints are multi-byte in UTF-8, and byte-wise surgery would corrupt
+// innocent multi-byte text nearby. Returning -1 drops the rune, and
+// strings.Map hands back the input string unchanged (no allocation) when
+// nothing matched, so clean strings pass through for free.
+func sanitizeTerminal(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // FormatStakeETA renders the seconds-until-next-expected-stake value from
 // getstakinginfo.expectedtime as something a human can read at a glance.
 // Units are picked by magnitude: a few minutes, a few hours and minutes,
@@ -315,9 +354,31 @@ type TxStatus struct {
 // start saying "confirmed". 6 matches the bitcoin-ecosystem default.
 const confirmedThreshold = 6
 
+// IsContractCandidate reports whether a listsinceblock entry looks like a
+// Gridcoin contract transaction — a beacon advertisement, a vote, a poll, a
+// project change, and so on.
+//
+// listsinceblock is structurally blind to contracts: nothing in the daemon's
+// transaction lister ever inspects them, so there is no "beacon" category to
+// match on. What gives them away is their shape. A contract's payload rides
+// in an OP_RETURN burn output, which has no destination address, so the
+// wallet reports the whole transaction as a "send" with an EMPTY address —
+// a combination an ordinary payment never produces.
+//
+// This only says "this is a contract"; which kind it is has to come from
+// gettransaction, cached in Model.txContracts.
+func IsContractCandidate(tx Transaction) bool {
+	return tx.Category == "send" && tx.Address == ""
+}
+
 // ClassifyTransaction maps the raw RPC category + confirmation depth to one
 // of our five status buckets. Order matters: stakes are detected first so
 // an un-confirmed stake reward doesn't show up as "upcoming".
+//
+// Contract transactions deliberately get no bucket of their own: this is the
+// confirmation lifecycle, and a contract burn really is a send that confirms
+// like any other. What it *contains* is shown in the address column instead,
+// see IsContractCandidate.
 func ClassifyTransaction(tx Transaction) TxStatus {
 	if tx.Category == "generate" || tx.Category == "immature" {
 		return TxStatus{Kind: TxStatusStake, Label: "stake", Icon: "✦"}

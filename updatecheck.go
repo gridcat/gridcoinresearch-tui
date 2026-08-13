@@ -93,9 +93,7 @@ func fetchLatestRelease(baseURL string) (releaseInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		// Cap the snippet so a huge error page can't blow up memory.
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return releaseInfo{}, fmt.Errorf("github returned %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+		return releaseInfo{}, githubStatusError(resp)
 	}
 	var rel releaseInfo
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
@@ -105,6 +103,37 @@ func fetchLatestRelease(baseURL string) (releaseInfo, error) {
 		return releaseInfo{}, fmt.Errorf("release payload had no tag_name")
 	}
 	return rel, nil
+}
+
+// fetchReleases queries GitHub's release list. Manual update checks use this to
+// show release notes for every version between the running binary and latest.
+func fetchReleases(baseURL string) ([]releaseInfo, error) {
+	url := strings.TrimRight(baseURL, "/") + "/repos/" + updateRepo + "/releases?per_page=100"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	githubHeaders(req)
+
+	resp, err := newUpdateHTTPClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, githubStatusError(resp)
+	}
+	var rels []releaseInfo
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rels); err != nil {
+		return nil, fmt.Errorf("decode releases: %w", err)
+	}
+	return rels, nil
+}
+
+func githubStatusError(resp *http.Response) error {
+	// Cap the snippet so a huge error page can't blow up memory.
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return fmt.Errorf("github returned %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
 }
 
 // archiveExt is the archive extension goreleaser uses for this OS: zip on
@@ -207,4 +236,36 @@ func isNewer(tag, current string) bool {
 		return false
 	}
 	return compareSemver(tag, current) > 0
+}
+
+// missedReleases returns the releases whose notes should be shown before
+// updating. Dev builds have no comparable installed version, so they show only
+// the latest release notes while still allowing a manual update.
+func missedReleases(current string, latest releaseInfo, releases []releaseInfo) []releaseInfo {
+	if current == "dev" || current == "" {
+		if latest.TagName == "" {
+			return nil
+		}
+		return []releaseInfo{latest}
+	}
+
+	out := make([]releaseInfo, 0, len(releases)+1)
+	seen := make(map[string]bool, len(releases)+1)
+	for _, rel := range releases {
+		if rel.TagName == "" || !isNewer(rel.TagName, current) {
+			continue
+		}
+		key := normalizeVersion(rel.TagName)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, rel)
+	}
+
+	latestKey := normalizeVersion(latest.TagName)
+	if latest.TagName != "" && isNewer(latest.TagName, current) && !seen[latestKey] {
+		out = append([]releaseInfo{latest}, out...)
+	}
+	return out
 }

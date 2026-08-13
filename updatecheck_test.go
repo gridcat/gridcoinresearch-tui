@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +59,28 @@ func TestIsNewer(t *testing.T) {
 		if got := isNewer(c.tag, c.current); got != c.want {
 			t.Errorf("isNewer(%q, %q) = %v, want %v", c.tag, c.current, got, c.want)
 		}
+	}
+}
+
+func TestMissedReleases(t *testing.T) {
+	latest := releaseInfo{TagName: "v1.4.0", Body: "four"}
+	releases := []releaseInfo{
+		{TagName: "v1.4.0", Body: "four"},
+		{TagName: "v1.3.0", Body: "three"},
+		{TagName: "v1.2.0", Body: "two"},
+		{TagName: "v1.1.0", Body: "one"},
+	}
+	got := missedReleases("1.2.0", latest, releases)
+	if len(got) != 2 {
+		t.Fatalf("missedReleases returned %d releases, want 2: %#v", len(got), got)
+	}
+	if got[0].TagName != "v1.4.0" || got[1].TagName != "v1.3.0" {
+		t.Errorf("missedReleases order/tags = %q, %q; want v1.4.0, v1.3.0", got[0].TagName, got[1].TagName)
+	}
+
+	got = missedReleases("dev", latest, releases)
+	if len(got) != 1 || got[0].TagName != "v1.4.0" {
+		t.Errorf("dev build should show latest-only notes, got %#v", got)
 	}
 }
 
@@ -244,6 +268,70 @@ func TestFetchLatestRelease(t *testing.T) {
 	}
 }
 
+func TestRenderReleaseChangelogsShowsAllMissed(t *testing.T) {
+	out := renderReleaseChangelogs([]releaseInfo{
+		{TagName: "v1.4.0", Body: "four"},
+		{TagName: "v1.3.0", Body: "three\n\n### Blockchain Timestamps\nnoise"},
+	})
+	for _, want := range []string{"v1.4.0", "four", "v1.3.0", "three"} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Errorf("renderReleaseChangelogs missing %q in:\n%s", want, out)
+		}
+	}
+	if bytes.Contains([]byte(out), []byte("Blockchain Timestamps")) {
+		t.Errorf("renderReleaseChangelogs should trim stamp section, got:\n%s", out)
+	}
+}
+
+func TestRenderReleaseChangelogsCapsCombinedOutput(t *testing.T) {
+	releases := make([]releaseInfo, 0, 8)
+	for i := 0; i < 8; i++ {
+		releases = append(releases, releaseInfo{
+			TagName: "v1." + strconv.Itoa(i) + ".0",
+			Body:    "line a\nline b\nline c",
+		})
+	}
+	out := renderReleaseChangelogs(releases)
+	if got := len(strings.Split(out, "\n")); got > 13 {
+		t.Fatalf("combined changelog rendered %d lines, want at most 13:\n%s", got, out)
+	}
+	if !strings.Contains(out, "see the release page") {
+		t.Errorf("combined changelog should advertise truncation, got:\n%s", out)
+	}
+}
+
+func TestFetchReleases(t *testing.T) {
+	rels := []releaseInfo{
+		{TagName: "v1.4.0", Body: "four"},
+		{TagName: "v1.3.0", Body: "three"},
+	}
+	var gotUA, gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(rels)
+	}))
+	defer srv.Close()
+
+	got, err := fetchReleases(srv.URL)
+	if err != nil {
+		t.Fatalf("fetchReleases: %v", err)
+	}
+	if len(got) != 2 || got[0].TagName != "v1.4.0" || got[1].TagName != "v1.3.0" {
+		t.Errorf("fetchReleases = %#v", got)
+	}
+	if gotUA == "" {
+		t.Errorf("no User-Agent sent (GitHub rejects those)")
+	}
+	if wantPath := "/repos/" + updateRepo + "/releases"; gotPath != wantPath {
+		t.Errorf("request path = %q, want %q", gotPath, wantPath)
+	}
+	if gotQuery != "per_page=100" {
+		t.Errorf("request query = %q, want per_page=100", gotQuery)
+	}
+}
+
 func TestFetchLatestReleaseHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rate limited", http.StatusForbidden)
@@ -304,6 +392,33 @@ func TestUpdateCheckBackgroundUpdatesBadge(t *testing.T) {
 	got := next.(Model)
 	if got.latestVersion != "2.0.0" {
 		t.Errorf("latestVersion = %q, want 2.0.0", got.latestVersion)
+	}
+}
+
+func TestUpdateCheckBackgroundPreservesManualChangelog(t *testing.T) {
+	oldVersion := version
+	defer func() { version = oldVersion }()
+	version = "1.2.0"
+
+	m := Model{mode: modeUpdate, update: updateState{step: updateStepChecking}}
+	manual := updateCheckMsg{
+		rel: releaseInfo{TagName: "v1.4.0"},
+		missedReleases: []releaseInfo{
+			{TagName: "v1.4.0", Body: "four"},
+			{TagName: "v1.3.0", Body: "three"},
+		},
+		manual: true,
+	}
+	next, _ := m.Update(manual)
+	got := next.(Model)
+	if len(got.update.missedReleases) != 2 {
+		t.Fatalf("manual changelog length = %d, want 2", len(got.update.missedReleases))
+	}
+
+	next, _ = got.Update(updateCheckMsg{rel: releaseInfo{TagName: "v1.4.0"}, manual: false})
+	got = next.(Model)
+	if len(got.update.missedReleases) != 2 || got.update.missedReleases[1].TagName != "v1.3.0" {
+		t.Fatalf("background check replaced manual changelog: %#v", got.update.missedReleases)
 	}
 }
 

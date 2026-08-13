@@ -255,7 +255,9 @@ func buildStyles(p palette) {
 	styleMainnetBadge = lipgloss.NewStyle().Foreground(p.mainnet).Bold(true)
 	styleTestnetBadge = lipgloss.NewStyle().Foreground(p.testnet).Bold(true)
 
-	styleStatLabelA = styleLabel.Width(14)
+	// 15 so the longest labels ("Immature Stake", "Pending Reward", both 14
+	// chars) keep a separating space before the value column.
+	styleStatLabelA = styleLabel.Width(15)
 	styleStatLabelB = styleLabel.Width(12)
 
 	styleTxStatusCol = lipgloss.NewStyle().Width(10).Foreground(p.label)
@@ -435,18 +437,18 @@ func (m Model) renderHeader() string {
 		}
 	}
 
-	// Right side shows block height, and — when a newer release is out — a
-	// green "⬆ vX.Y.Z" badge advertising the "u" key (the note the user asked
-	// for). Suppressed on dev builds and when --no-update-check is set.
-	rightSide := blockInfo
+	// Right side always shows the running build version. When a newer release is
+	// out, a compact green badge advertises the "u" key without duplicating the
+	// latest version number shown in the update modal.
+	rightParts := []string{}
 	if m.updateAvailable && m.latestVersion != "" {
-		badge := styleGood.Render("⬆ v" + m.latestVersion)
-		if rightSide != "" {
-			rightSide = lipgloss.JoinHorizontal(lipgloss.Top, badge, "  ", rightSide)
-		} else {
-			rightSide = badge
-		}
+		rightParts = append(rightParts, styleGood.Render("⬆"))
 	}
+	rightParts = append(rightParts, styleMuted.Render(displayVersion()))
+	if blockInfo != "" {
+		rightParts = append(rightParts, blockInfo)
+	}
+	rightSide := strings.Join(rightParts, "  ")
 
 	leftHalf := lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", networkBadge)
 	gap := m.width - lipgloss.Width(leftHalf) - lipgloss.Width(rightSide) - 4
@@ -528,11 +530,42 @@ func (m Model) renderStats() string {
 	// spendable or not. Same sum the GUI uses (balance + stake + unconfirmed
 	// + immature), so the figure lines up 1:1 with what people see there.
 	total := m.wallet.Balance + m.wallet.Stake + unconfirmed + m.wallet.ImmatureBalance
-	rows = append(rows, statRow("Total", fmtBal(total), "", ""))
+	// The Total row's right half was the only always-rendered free slot, so
+	// the cruncher/investor indicator lives there (issue #7). It matters that
+	// it shows for investors too: the researcher row below only appears for
+	// crunchers, so without this an investor could never tell whether the
+	// wallet was mis-configured or simply isn't crunching. The label goes
+	// away with the badge when neither is known yet.
+	researcher := m.researcherBadge()
+	researcherLabel := "Researcher"
+	if researcher == "" {
+		researcherLabel = ""
+	}
+	rows = append(rows, statRow("Total", fmtBal(total), researcherLabel, researcher))
+
+	// Researcher stats (issue #7): pending research reward + magnitude.
+	// getstakinginfo only carries these when a CPID is configured, so the
+	// row disappears for investors. Placed after Total because the pending
+	// reward is not part of the wallet's current holdings. The reward is an
+	// amount and honours anonymous mode via fmtBal; magnitude is public
+	// network data and stays visible. Note the row's mere presence still
+	// reveals "this wallet crunches" in anonymous mode — that's within the
+	// mode's contract (it hides monetary amounts, not identity).
+	if m.staking.Magnitude != nil {
+		pending := 0.0
+		if m.staking.PendingReward != nil {
+			pending = *m.staking.PendingReward
+		}
+		rows = append(rows, statRow("Pending Reward", fmtBal(pending),
+			"Magnitude", styleValue.Render(fmt.Sprintf("%.2f", *m.staking.Magnitude))))
+	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	// The daemon controls rpcError.Message, so every error string that came
+	// over RPC goes through sanitizeTerminal like any other daemon field.
+	// Same treatment at every error line below.
 	if m.walletErr != "" {
-		content = lipgloss.JoinVertical(lipgloss.Left, content, "", styleBad.Render("error: "+m.walletErr))
+		content = lipgloss.JoinVertical(lipgloss.Left, content, "", styleBad.Render("error: "+sanitizeTerminal(m.walletErr)))
 	}
 	return styleBorder.Width(m.width - 2).Render(content)
 }
@@ -558,9 +591,34 @@ func (m Model) stakingBadge() string {
 		return styleGood.Render(label)
 	}
 	if m.staking.MiningError != "" {
-		return styleWarn.Render("○ " + m.staking.MiningError)
+		return styleWarn.Render("○ " + sanitizeTerminal(m.staking.MiningError))
 	}
 	return styleMuted.Render("○ no")
+}
+
+// researcherBadge says whether this wallet crunches for BOINC or is
+// investor-only (issue #7). The CPID is truncated with the same helper the
+// address columns use, which keeps the Total row inside 80 columns — a full
+// 32-char digest would wrap it.
+//
+// An empty CPID returns an empty badge, and the caller drops the label with
+// it. That case is "we don't know yet", not "investor": getstakinginfo is the
+// third fetch of the startup sequence, so a badge that defaulted to investor
+// would tell every cruncher the wrong thing for the first frames. It is also
+// what the daemon itself sends when it cannot resolve an id at all.
+//
+// Deliberately visible in anonymous mode: a CPID is a public on-chain
+// identifier, not a monetary amount, and the researcher row just below
+// already treats magnitude the same way.
+func (m Model) researcherBadge() string {
+	switch {
+	case m.staking.CPID == "":
+		return ""
+	case !m.staking.IsCruncher():
+		return styleMuted.Render("investor")
+	default:
+		return styleGood.Render("cruncher ") + styleValue.Render(ShortAddress(m.staking.CPID))
+	}
 }
 
 func (m Model) lockBadge() string {
@@ -651,7 +709,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("loading…"))
 	}
 	if m.addrsErr != "" {
-		return box.Render(styleTitle.Render(title) + "\n" + styleBad.Render("error: "+m.addrsErr))
+		return box.Render(styleTitle.Render(title) + "\n" + styleBad.Render("error: "+sanitizeTerminal(m.addrsErr)))
 	}
 	if len(m.addresses) == 0 {
 		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("wallet has no addresses yet, run `getnewaddress`"))
@@ -730,7 +788,12 @@ type styledSeg struct {
 // itself, then optional watch-only flag, label, and received amount, each
 // separated by a two-space gap.
 func addressRowSegments(a ReceivedAddress, anonymous bool, own addrOwnership) []styledSeg {
-	segs := []styledSeg{{a.Address, styleValue}}
+	// Sanitize the daemon-sourced texts as the segments are built: every
+	// consumer (addrMaxScroll's widest-row measurement, clipSegments'
+	// column slicing) measures these exact strings, so cleaning them any
+	// later would make the horizontal-scroll math disagree with what is
+	// actually printed.
+	segs := []styledSeg{{sanitizeTerminal(a.Address), styleValue}}
 	gap := styledSeg{"  ", styleMuted}
 	if own == ownForeign {
 		// listreceivedbyaddress includes addresses you've only labelled but
@@ -746,7 +809,7 @@ func addressRowSegments(a ReceivedAddress, anonymous bool, own addrOwnership) []
 		// you try to sign or spend".
 		segs = append(segs, gap, styledSeg{"👁 watch-only", styleWarn})
 	}
-	if l := a.DisplayLabel(); l != "" {
+	if l := sanitizeTerminal(a.DisplayLabel()); l != "" {
 		segs = append(segs, gap, styledSeg{l, styleMuted})
 	}
 	if a.Amount > 0 {
@@ -943,7 +1006,7 @@ func (m Model) renderTxList(height int) string {
 		return boxStyle.Render(title + "\n" + styleMuted.Render("loading…"))
 	}
 	if m.txsErr != "" {
-		return boxStyle.Render(title + "\n" + styleBad.Render("error: "+m.txsErr))
+		return boxStyle.Render(title + "\n" + styleBad.Render("error: "+sanitizeTerminal(m.txsErr)))
 	}
 	if len(m.txs) == 0 {
 		return boxStyle.Render(title + "\n" + styleMuted.Render("no transactions yet"))
@@ -953,7 +1016,12 @@ func (m Model) renderTxList(height int) string {
 	lines := []string{title}
 	for i := offset; i < offset+maxRows && i < len(m.txs); i++ {
 		prefix := "  "
-		line := renderTxRow(m.txs[i], m.anonymous)
+		// A missing cache entry yields "", the same value as a lookup that
+		// came back with no type. The row renders both as a generic
+		// "(contract)", which reads correctly either way: still resolving,
+		// or a contract the daemon itself could not classify. Only the
+		// detail modal needs to tell the two apart.
+		line := renderTxRow(m.txs[i], m.anonymous, m.txContracts[m.txs[i].TxID])
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
 			// tx list leaves the cursor as a silent bookmark, symmetric
@@ -968,7 +1036,10 @@ func (m Model) renderTxList(height int) string {
 	return boxStyle.Render(strings.Join(lines, "\n"))
 }
 
-func renderTxRow(tx Transaction, anonymous bool) string {
+// renderTxRow renders one transaction line. contractType is the cached
+// Gridcoin contract kind for this txid ("beacon", "vote", …), or "" when it
+// is unknown or the transaction carries no contract; see Model.txContracts.
+func renderTxRow(tx Transaction, anonymous bool, contractType string) string {
 	st := ClassifyTransaction(tx)
 	iconStyle, ok := txKindStyle[st.Kind]
 	if !ok {
@@ -994,11 +1065,24 @@ func renderTxRow(tx Transaction, anonymous bool) string {
 	addr := tx.Address
 	if addr == "" && (tx.Category == "generate" || tx.Category == "immature") {
 		addr = "(stake)"
+	} else if IsContractCandidate(tx) {
+		// A beacon or vote has no counterparty address, so this column would
+		// otherwise be blank and the row would read as broken data. Name the
+		// contract instead. Every label stays under ShortAddress's 12-char
+		// eliding threshold — "(sidestake)", the longest of the daemon's
+		// contract types, is 11 — so these pass through it unaltered.
+		if contractType == "" {
+			contractType = "contract"
+		}
+		addr = "(" + contractType + ")"
 	}
-	addrCol := styleTxAddrCol.Render(ShortAddress(addr))
+	// Sanitized after the label is assembled, so the daemon-supplied contract
+	// type is covered along with tx.Address, and before ShortAddress so its
+	// length check counts the characters that will actually be printed.
+	addrCol := styleTxAddrCol.Render(ShortAddress(sanitizeTerminal(addr)))
 
 	timeCol := styleTxTimeCol.Render(styleMuted.Render(FormatRelativeTime(tx.Time)))
-	catCol := styleMuted.Render(tx.Category)
+	catCol := styleMuted.Render(sanitizeTerminal(tx.Category))
 
 	return lipgloss.JoinHorizontal(lipgloss.Top,
 		icon, " ", status, amountCol, "  ", addrCol, "  ", timeCol, "  ", catCol,
@@ -1037,7 +1121,7 @@ func (m Model) renderPollsList(height int) string {
 	case !m.pollsLoaded:
 		status = styleMuted.Render("loading…")
 	case m.pollsErr != "":
-		status = styleBad.Render("error: " + m.pollsErr)
+		status = styleBad.Render("error: " + sanitizeTerminal(m.pollsErr))
 	case len(m.polls) == 0:
 		status = styleMuted.Render("no polls")
 	}
@@ -1081,8 +1165,11 @@ func (m Model) renderPollRow(p Poll) string {
 	if titleWidth < 12 {
 		titleWidth = 12
 	}
-	title := lipgloss.NewStyle().Width(titleWidth).Render(truncate(p.Title, titleWidth-1))
-	weight := stylePollWeightCol.Render(ShortWeightType(p.WeightType))
+	// Poll title, weight type and leading choice are on-chain data any network
+	// participant can author (see sanitizeTerminal), cleaned before truncate /
+	// ShortWeightType so the width budget matches the printed text.
+	title := lipgloss.NewStyle().Width(titleWidth).Render(truncate(sanitizeTerminal(p.Title), titleWidth-1))
+	weight := stylePollWeightCol.Render(ShortWeightType(sanitizeTerminal(p.WeightType)))
 
 	var stat string
 	if r, ok := m.pollResults[p.ID]; ok {
@@ -1090,7 +1177,7 @@ func (m Model) renderPollRow(p Poll) string {
 		if r.VotePercentAVW != nil {
 			pct = fmt.Sprintf("%.0f%%", *r.VotePercentAVW)
 		}
-		leader := r.TopChoice
+		leader := sanitizeTerminal(r.TopChoice)
 		if leader == "" {
 			leader = "—"
 		}
@@ -1138,16 +1225,22 @@ func (m Model) renderPollDetailModal() string {
 		status = styleGood.Render("● active") + styleMuted.Render(" · "+formatPollTimeLeft(exp)+" left")
 	}
 
+	// The daemon-sourced values are sanitized at the call sites, not inside
+	// field: field also receives values we already rendered ourselves (the
+	// Status line above, and its counterpart in renderTxDetailModal), and
+	// sanitizing those would strip our own SGR colour escapes along with the
+	// hostile ones. Everything here is on-chain poll-author data, cleaned
+	// before truncate so the column budget matches the printed text.
 	lines := []string{
 		styleTitle.Render("Poll"),
 		"",
-		field("Title", p.Title),
+		field("Title", sanitizeTerminal(p.Title)),
 		field("Status", status),
-		field("Question", orDash(truncate(p.Question, 74))),
-		field("URL", orDash(truncate(p.URL, 74))),
-		field("Weight type", orDash(p.WeightType)),
-		field("Responses", orDash(p.ResponseType)),
-		field("Created", orDash(p.Timestamp)),
+		field("Question", orDash(truncate(sanitizeTerminal(p.Question), 74))),
+		field("URL", orDash(truncate(sanitizeTerminal(p.URL), 74))),
+		field("Weight type", orDash(sanitizeTerminal(p.WeightType))),
+		field("Responses", orDash(sanitizeTerminal(p.ResponseType))),
+		field("Created", orDash(sanitizeTerminal(p.Timestamp))),
 		field("Duration", fmt.Sprintf("%d days", p.DurationDays)),
 		field("Votes", fmt.Sprintf("%d", p.Votes)),
 	}
@@ -1165,7 +1258,7 @@ func (m Model) renderPollDetailModal() string {
 		// The tally finished with an error (e.g. a transient reorg per the
 		// daemon's getpollresults note). Show it instead of a stuck spinner.
 		lines = append(lines,
-			styleBad.Render("  couldn't load results: "+m.pollResultErr[p.ID]),
+			styleBad.Render("  couldn't load results: "+sanitizeTerminal(m.pollResultErr[p.ID])),
 			styleMuted.Render("  press r to retry"))
 	case !ok:
 		// Pending, or the brief window just after opening: animate so it's
@@ -1184,7 +1277,7 @@ func (m Model) renderPollDetailModal() string {
 			stats := fmt.Sprintf("%.0f%% share · %s weight · %s votes",
 				frac*100, formatCompactNumber(resp.Weight), formatVoteCount(resp.Votes))
 			lines = append(lines,
-				"  "+styleValue.Render(resp.Choice),
+				"  "+styleValue.Render(sanitizeTerminal(resp.Choice)),
 				lipgloss.JoinHorizontal(lipgloss.Top, "    ", renderBar(frac, 16), "  ", styleMuted.Render(stats)),
 			)
 		}
@@ -1279,7 +1372,10 @@ func (m Model) renderSendModal() string {
 		if m.send.validating {
 			body += "\n\n" + styleMuted.Render("validating…")
 		} else if m.send.errMsg != "" {
-			body += "\n\n" + styleBad.Render(m.send.errMsg)
+			// errMsg carries the validateaddress RPC error verbatim on this
+			// step (and unlock/send errors elsewhere), so it's daemon text
+			// like any other — sanitized at every render below.
+			body += "\n\n" + styleBad.Render(sanitizeTerminal(m.send.errMsg))
 		} else {
 			body += "\n\n" + styleMuted.Render("enter to validate · esc to cancel")
 		}
@@ -1291,14 +1387,14 @@ func (m Model) renderSendModal() string {
 		}
 		body += "\n\n" + styleMuted.Render("available: "+avail)
 		if m.send.errMsg != "" {
-			body += "\n\n" + styleBad.Render(m.send.errMsg)
+			body += "\n\n" + styleBad.Render(sanitizeTerminal(m.send.errMsg))
 		} else {
 			body += "\n\n" + styleMuted.Render("enter to continue · backspace to go back · esc to cancel")
 		}
 	case sendStepPassphrase:
 		body = "Wallet is locked. Passphrase:\n\n" + m.send.passphrase.View()
 		if m.send.errMsg != "" {
-			body += "\n\n" + styleBad.Render(m.send.errMsg)
+			body += "\n\n" + styleBad.Render(sanitizeTerminal(m.send.errMsg))
 		} else {
 			body += "\n\n" + styleMuted.Render("enter to continue · esc to cancel")
 		}
@@ -1313,9 +1409,11 @@ func (m Model) renderSendModal() string {
 		body += "\n" + styleMuted.Render("[y] broadcast   [n] cancel")
 	case sendStepResult:
 		if m.send.resultErr != "" {
-			body = styleBad.Render("send failed") + "\n\n" + m.send.resultErr
+			body = styleBad.Render("send failed") + "\n\n" + sanitizeTerminal(m.send.resultErr)
 		} else {
-			body = styleGood.Render("sent ✓") + "\n\n" + "txid: " + m.send.resultTxID
+			// The txid is the daemon's response string too, sanitized like
+			// the error branch above.
+			body = styleGood.Render("sent ✓") + "\n\n" + "txid: " + sanitizeTerminal(m.send.resultTxID)
 		}
 		body += "\n\n" + styleMuted.Render("press any key to close")
 	}
@@ -1362,11 +1460,16 @@ func (m Model) renderSignModal() string {
 		}
 	case signStepResult:
 		if m.sign.resultErr != "" {
-			body = styleBad.Render("sign failed") + "\n\n" + m.sign.resultErr
+			// The signmessage / unlock RPC error, daemon-authored text —
+			// sanitized like every other daemon string.
+			body = styleBad.Render("sign failed") + "\n\n" + sanitizeTerminal(m.sign.resultErr)
 		} else {
+			// The signature is a daemon response string; a legitimate one is
+			// pure base64, so sanitizing is a no-op unless something hostile
+			// snuck in. The message is the user's own typed input, left as-is.
 			body = styleGood.Render("signed ✓") + "\n\n" +
 				styleLabel.Render("Message:") + "\n" + m.sign.message.Value() + "\n\n" +
-				styleLabel.Render("Signature (base64):") + "\n" + m.sign.resultSig
+				styleLabel.Render("Signature (base64):") + "\n" + sanitizeTerminal(m.sign.resultSig)
 		}
 		body += "\n\n" + styleMuted.Render("press any key to close")
 	}
@@ -1420,8 +1523,10 @@ func (m Model) renderSignModal() string {
 // only) plus the editable label input. Mirrors renderSignModal's double
 // border centered layout, minus the multi-step machinery.
 func (m Model) renderEditLabelModal() string {
+	// Same daemon-sourced address string the panel shows (see
+	// addressRowSegments), so it gets the same scrubbing on this surface.
 	header := styleTitle.Render("Edit label") + "\n" +
-		styleLabel.Render("Address: ") + styleAccent.Render(m.edit.address)
+		styleLabel.Render("Address: ") + styleAccent.Render(sanitizeTerminal(m.edit.address))
 
 	body := "Label:\n\n" + m.edit.label.View()
 	// Heads-up for the setaccount quirk (see runSetLabel): relabeling an
@@ -1431,7 +1536,9 @@ func (m Model) renderEditLabelModal() string {
 	// warn rather than surprise. The modal's Width wraps this for us.
 	body += "\n\n" + styleMuted.Render("Heads-up: the daemon may spawn an extra address with the old label on save. harmless quirk, coins unaffected.")
 	if m.edit.errMsg != "" {
-		body += "\n\n" + styleBad.Render(m.edit.errMsg)
+		// Carries the setaccount RPC error verbatim on failure, so it gets
+		// the same sanitizing as every other daemon-authored string.
+		body += "\n\n" + styleBad.Render(sanitizeTerminal(m.edit.errMsg))
 	} else {
 		body += "\n\n" + styleMuted.Render("enter to save · empty clears label · esc to cancel")
 	}
@@ -1478,9 +1585,22 @@ func (m Model) renderTxDetailModal() string {
 	}
 	statusLine := field("Status", kindStyle.Render(st.Icon+" "+st.Label))
 
-	addr := tx.Address
-	if addr == "" && (tx.Category == "generate" || tx.Category == "immature") {
+	// Daemon-sourced values are sanitized at each call site rather than
+	// inside field: field also receives values we rendered ourselves (the
+	// Status line above, the muted "resolving…" below), and sanitizing those
+	// would strip our own SGR colour escapes along with the hostile ones.
+	// The IsContractCandidate branches below test tx.Address BEFORE
+	// sanitizing, so a category/address forged out of control bytes can't
+	// flip a real payment into the address-less contract branch.
+	addr := sanitizeTerminal(tx.Address)
+	if tx.Address == "" && (tx.Category == "generate" || tx.Category == "immature") {
 		addr = "(stake reward, no counterparty address)"
+	} else if IsContractCandidate(tx) {
+		// Deliberately does not call it a contract: that claim belongs to the
+		// Contract field above, which only makes it once the daemon has
+		// confirmed one. All we know from listsinceblock alone is that the
+		// output had nowhere to go.
+		addr = "(burned, no destination address)"
 	} else if addr == "" {
 		addr = "—"
 	}
@@ -1509,23 +1629,35 @@ func (m Model) renderTxDetailModal() string {
 		styleTitle.Render("Transaction"),
 		"",
 		statusLine,
-		field("Category", tx.Category),
-		field("Amount", amountStr),
+		field("Category", sanitizeTerminal(tx.Category)),
 	}
+	// What this "send" actually was. The daemon's own category can't say —
+	// the contract is only visible via gettransaction, normally already
+	// fetched by the txsMsg batch and otherwise asked for when this modal
+	// opens (see update.go, case "enter"). Three states: a known type,
+	// still-resolving, and resolved-as-no-contract, which drops the line.
+	if IsContractCandidate(tx) {
+		if ctype, ok := m.txContracts[tx.TxID]; !ok {
+			lines = append(lines, field("Contract", styleMuted.Render("resolving…")))
+		} else if ctype != "" {
+			lines = append(lines, field("Contract", sanitizeTerminal(ctype)))
+		}
+	}
+	lines = append(lines, field("Amount", amountStr))
 	if tx.Fee != 0 {
 		lines = append(lines, field("Fee", feeStr))
 	}
 	lines = append(lines,
 		field("Address", addr),
-		field("TxID", tx.TxID),
+		field("TxID", sanitizeTerminal(tx.TxID)),
 		field("Confirmations", confLine),
 		field("Time", timeLine),
 	)
 	if tx.BlockHash != "" {
-		lines = append(lines, field("Block hash", tx.BlockHash))
+		lines = append(lines, field("Block hash", sanitizeTerminal(tx.BlockHash)))
 	}
 	if tx.Comment != "" {
-		lines = append(lines, field("Comment", tx.Comment))
+		lines = append(lines, field("Comment", sanitizeTerminal(tx.Comment)))
 	}
 	lines = append(lines, "", styleMuted.Render("enter/esc to close"))
 
@@ -1570,6 +1702,22 @@ func clampChangelog(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+func renderReleaseChangelogs(releases []releaseInfo) string {
+	if len(releases) == 0 {
+		return styleMuted.Render("(no release notes)")
+	}
+	sections := make([]string, 0, len(releases))
+	for _, rel := range releases {
+		notes := trimStampSection(rel.Body)
+		if notes == "" {
+			notes = styleMuted.Render("(no release notes)")
+		}
+		version := "v" + strings.TrimPrefix(rel.TagName, "v")
+		sections = append(sections, styleTitle.Render(version)+"\n"+notes)
+	}
+	return clampChangelog(strings.Join(sections, "\n\n"))
+}
+
 // renderUpdateModal draws the self-update flow: a live check, then either
 // "up to date" or a changelog + confirm, then an install progress line. The
 // changelog is the original release notes with the on-chain stamp section
@@ -1586,13 +1734,7 @@ func (m Model) renderUpdateModal() string {
 	case updateStepAvailable:
 		latest := "v" + strings.TrimPrefix(m.update.rel.TagName, "v")
 		body = "Current " + displayVersion() + "  →  " + styleGood.Render(latest) + "\n\n"
-		changelog := trimStampSection(m.update.rel.Body)
-		if changelog == "" {
-			changelog = styleMuted.Render("(no release notes)")
-		} else {
-			changelog = clampChangelog(changelog)
-		}
-		body += styleTitle.Render("What changed") + "\n" + changelog + "\n\n"
+		body += styleTitle.Render("What changed") + "\n" + renderReleaseChangelogs(m.update.missedReleases) + "\n\n"
 		body += styleWarn.Render("Downloads and replaces the binary, then restarts the TUI.") + "\n\n"
 		body += styleMuted.Render("[y] Update & restart   [n] Cancel")
 	case updateStepInstalling:

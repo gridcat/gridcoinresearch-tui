@@ -18,11 +18,11 @@
 //	           concurrently; tea.Tick schedules a Msg for the future.
 //
 // So a typical cycle looks like:
-//   1. tickMsg arrives → Update returns (m, Batch(fetchWallet, fetchTxs,…))
-//   2. fetchWallet runs in a goroutine, calls GetWalletInfo, returns
-//      walletMsg{w, err}
-//   3. Update receives walletMsg, stores m.wallet = w, returns (m, nil)
-//   4. View renders the new Model
+//  1. tickMsg arrives → Update returns (m, Batch(fetchWallet, fetchTxs,…))
+//  2. fetchWallet runs in a goroutine, calls GetWalletInfo, returns
+//     walletMsg{w, err}
+//  3. Update receives walletMsg, stores m.wallet = w, returns (m, nil)
+//  4. View renders the new Model
 package main
 
 import (
@@ -77,6 +77,13 @@ type addrsMsg struct {
 type addrMineMsg struct {
 	mine map[string]bool
 }
+
+// txContractsMsg carries Gridcoin contract types resolved by gettransaction,
+// keyed by txid, to be merged into Model.txContracts. An entry with an empty
+// value means "resolved, carries no contract" — see fetchContracts.
+type txContractsMsg struct {
+	types map[string]string
+}
 type validateMsg struct {
 	v   ValidateAddress
 	err error
@@ -126,9 +133,10 @@ type pollSettleMsg struct{ id string }
 // state machine, so a background check that races with it — and especially a
 // background *error* — can never flip the modal to a false "failed".
 type updateCheckMsg struct {
-	rel    releaseInfo
-	err    error
-	manual bool
+	rel            releaseInfo
+	missedReleases []releaseInfo
+	err            error
+	manual         bool
 }
 
 // updateInstallMsg carries the result of the download+verify+swap. newExe is
@@ -285,6 +293,52 @@ func fetchAddrOwnership(rpc *RPCClient, addrs []string) tea.Cmd {
 			mine[a] = v.IsMine
 		}
 		return addrMineMsg{mine}
+	}
+}
+
+// fetchContracts resolves the Gridcoin contract type of each given
+// transaction via gettransaction, one txid at a time — the same serial
+// good-neighbour policy as fetchAddrOwnership above, for the same reason.
+//
+// We need it because listsinceblock reports a beacon advertisement or a vote
+// as an ordinary "send" and never mentions the contract riding along with it
+// (see IsContractCandidate); gettransaction is the only wallet RPC that
+// decodes it. Callers pass only txids that aren't cached yet, and a mined
+// contract never changes, so in the steady state this stays quiet.
+//
+// "Not cached yet" is not the same as "not already being fetched": the cache
+// only fills when the reply lands, so a tick or a modal open during a long
+// initial batch can start a second lookup for the same txid. The results are
+// identical and merge idempotently, which is why this is left unguarded —
+// the same trade-off fetchAddrOwnership already makes.
+//
+// A txid whose lookup fails is left out of the map entirely rather than
+// cached as "no contract": leaving it unresolved means the next wallet
+// activity — or the user opening its detail modal — retries it, where a
+// wrong negative answer would stick for the whole session.
+func fetchContracts(rpc *RPCClient, txids []string) tea.Cmd {
+	return func() tea.Msg {
+		types := make(map[string]string, len(txids))
+		for _, id := range txids {
+			d, err := rpc.GetTransaction(id)
+			if err != nil {
+				continue
+			}
+			// The empty string is a real answer here ("we asked, there is no
+			// contract"), which is what stops us asking again every tick.
+			//
+			// Only the first contract is read. The field is a vector, but the
+			// daemon treats one-per-transaction as the rule and indexes
+			// vContracts[0] the same way throughout its own miner, voting and
+			// wallet code — block validation even rejects a coinbase carrying
+			// more than one.
+			var t string
+			if len(d.Contracts) > 0 {
+				t = d.Contracts[0].Type
+			}
+			types[id] = t
+		}
+		return txContractsMsg{types}
 	}
 }
 
@@ -470,7 +524,17 @@ func runSetLabel(rpc *RPCClient, addr, label string) tea.Cmd {
 func checkUpdateCmd(manual bool) tea.Cmd {
 	return func() tea.Msg {
 		rel, err := fetchLatestRelease(updateAPIBase)
-		return updateCheckMsg{rel: rel, err: err, manual: manual}
+		if err != nil {
+			return updateCheckMsg{err: err, manual: manual}
+		}
+		var releases []releaseInfo
+		if manual {
+			releases, err = fetchReleases(updateAPIBase)
+			if err != nil {
+				return updateCheckMsg{err: err, manual: manual}
+			}
+		}
+		return updateCheckMsg{rel: rel, missedReleases: missedReleases(version, rel, releases), manual: manual}
 	}
 }
 
@@ -610,9 +674,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// AFTER the initial load. Idle wallets produce hasNew=false on
 		// every tick, so the expensive listreceivedbyaddress RPC stays
 		// quiet until something actually changes.
+		var cmds []tea.Cmd
 		if alreadyLoaded && hasNew {
-			spin := m.bumpInflight(1)
-			return m, tea.Batch(fetchAddrs(m.rpc), spin)
+			cmds = append(cmds, fetchAddrs(m.rpc))
+		}
+		// Resolve the type of any contract transaction we haven't looked up
+		// yet. Same "only when something changed" gate as the addresses
+		// above, with one addition: the initial load (!alreadyLoaded) is the
+		// pass that returns the entire wallet history, so it's where a
+		// long-standing voter's backlog gets resolved. That one batch does
+		// overlap the tail of refreshAllCmd's sequence (fetchTxs is its
+		// fifth step, fetchAddrs its sixth), so startup can briefly hold two
+		// RPC workers. Accepted: it happens once per launch, and the
+		// gettransaction side is a wallet-map lookup rather than a scan.
+		if !alreadyLoaded || hasNew {
+			if ids := m.uncachedContractTxIDs(); len(ids) > 0 {
+				cmds = append(cmds, fetchContracts(m.rpc, ids))
+			}
+		}
+		if len(cmds) > 0 {
+			// tea.Sequence, not tea.Batch, for the fetches: this is the only
+			// handler that can dispatch two of them at once, and running
+			// listreceivedbyaddress and a gettransaction walk concurrently
+			// would hold two daemon RPC workers — the thing refreshAllCmd
+			// goes out of its way to avoid. The spinner tick stays outside
+			// the sequence: it isn't an RPC, and burying it behind the
+			// fetches would delay the first frame until they finished.
+			spin := m.bumpInflight(len(cmds))
+			return m, tea.Batch(tea.Sequence(cmds...), spin)
 		}
 		return m, nil
 	case addrsMsg:
@@ -647,6 +736,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// unknown row turns out foreign and leaves the Mine view), so re-clamp
 		// the cursor against the now-current visible length.
 		m.addrCursor = clampCursor(m.addrCursor, len(m.visibleAddresses()))
+		return m, nil
+
+	case txContractsMsg:
+		m.finishFetch()
+		for id, t := range msg.types {
+			m.txContracts[id] = t
+		}
 		return m, nil
 
 	case validateMsg:
@@ -772,11 +868,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		// Any successful check — manual or background — refreshes the badge and
-		// the cached release used by the install step.
-		m.update.rel = msg.rel
+		// Any successful check — manual or background — refreshes the badge.
+		// Only a manual check owns the modal payload; background checks do not
+		// fetch missed release notes and must not collapse an open changelog to
+		// latest-only while the user is reading it.
 		m.latestVersion = strings.TrimPrefix(msg.rel.TagName, "v")
 		m.updateAvailable = isNewer(msg.rel.TagName, version)
+		if msg.manual {
+			m.update.rel = msg.rel
+			m.update.missedReleases = msg.missedReleases
+			if len(m.update.missedReleases) == 0 {
+				m.update.missedReleases = missedReleases(version, msg.rel, nil)
+			}
+		}
 		// Only a manual check drives the modal, and only from its "checking"
 		// state. That ignores a background check landing while the user reads
 		// the changelog or is mid-install, so it can't yank the view around.
@@ -883,6 +987,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeUpdate
 		m.update.step = updateStepChecking
 		m.update.errMsg = ""
+		m.update.missedReleases = nil
 		return m, checkUpdateCmd(true)
 	case "p":
 		// Open the full-screen polls list and (re)load it. Lazy on purpose:
@@ -930,6 +1035,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// addresses panel is focused is a no-op on purpose.
 		if m.focusedArea == focusTx && len(m.txs) > 0 && m.txCursor >= 0 && m.txCursor < len(m.txs) {
 			m.mode = modeTxDetail
+			// Last-resort contract lookup for the row the user is actually
+			// looking at. Normally the type is already cached from the
+			// txsMsg batch, but that batch drops txids whose lookup failed,
+			// so this doubles as the retry path: opening the modal asks
+			// again, and it fills itself in when the reply lands. If this
+			// attempt fails too the field keeps saying "resolving…" until
+			// the next wallet change or the next time the modal is opened.
+			tx := m.txs[m.txCursor]
+			if _, ok := m.txContracts[tx.TxID]; !ok && IsContractCandidate(tx) {
+				spin := m.bumpInflight(1)
+				return m, tea.Batch(fetchContracts(m.rpc, []string{tx.TxID}), spin)
+			}
 		}
 		return m, nil
 	case "up", "k":

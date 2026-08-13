@@ -68,6 +68,36 @@ type StakingInfo struct {
 	Difficulty   StakingDifficulty `json:"difficulty"`
 	NetStakeWt   float64           `json:"netstakeweight"`
 	ExpectedTime int64             `json:"expectedtime"` // seconds until the wallet expects to stake next
+
+	// Researcher-only fields: the daemon includes these when a CPID is
+	// configured (crunchers) and omits them entirely for investors —
+	// pointers so "no CPID" (nil) is distinguishable from a real 0.
+	Magnitude     *float64 `json:"current_magnitude"`
+	PendingReward *float64 `json:"BoincRewardPending"`
+
+	// CPID is always present, unlike the two above: a 32-char hex digest for
+	// a cruncher, or a short placeholder word for everyone else. A plain
+	// string (not a pointer) because there is no absent-vs-zero ambiguity to
+	// preserve — every non-cruncher value means the same thing. See
+	// IsCruncher for why we never compare it against a literal.
+	CPID string `json:"CPID"`
+}
+
+// IsCruncher reports whether this wallet has a BOINC CPID (as opposed to
+// being investor-only).
+//
+// The length check is the whole test, deliberately. The daemon builds this
+// field from MiningId::ToString(), which returns a 32-char hex digest for a
+// real CPID and otherwise one of several short placeholders — "NONCRUNCHER"
+// in the 5.5.0 source, "INVESTOR" per older reports, or "" when unset. A real
+// CPID is always exactly 32 hex chars, so a length test recognises the
+// cruncher case without us having to keep a list of the daemon's
+// ever-shifting placeholder words in sync.
+//
+// Note a CPID can exist without an active beacon (magnitude would then be 0),
+// so this answers "is there a CPID", not "is this wallet earning".
+func (s StakingInfo) IsCruncher() bool {
+	return len(s.CPID) == 32
 }
 
 // StakingDifficulty is the awkward case. Depending on the wallet version,
@@ -151,6 +181,35 @@ type Transaction struct {
 	BlockHash     string  `json:"blockhash"` // empty until the tx is mined
 	BlockTime     int64   `json:"blocktime"` // unix seconds, empty until mined
 	Comment       string  `json:"comment"`
+}
+
+// TxDetail is the slice of gettransaction we care about. Gridcoin's wallet
+// gettransaction — unlike Bitcoin's — also runs the raw transaction through
+// TxToJSON, so it carries the decoded Gridcoin contracts. That makes it the
+// only wallet RPC that can tell us a "send" was really a beacon or a vote:
+// listsinceblock never looks at a transaction's contracts at all.
+//
+// Everything else in the response (amount, fee, confirmations, vin/vout, the
+// details array) we already have from listsinceblock, so we don't decode it.
+// The response also repeats txid/time/blockhash twice, a quirk of building it
+// from two different serialisers; encoding/json simply keeps the last of a
+// duplicated key.
+type TxDetail struct {
+	Contracts []TxContract `json:"contracts"`
+}
+
+// TxContract is one Gridcoin contract attached to a transaction.
+//
+// We decode the type and nothing else. The sibling "body" field is
+// polymorphic — an object whose shape differs per type, and a bare JSON
+// string for type "message" — so decoding it would mean a RawMessage plus a
+// per-type switch, and no part of the UI asks for its contents. "action"
+// (add/remove) and "version" are skipped for the same reason.
+type TxContract struct {
+	// Type is the contract kind: "beacon", "vote", "poll", "project",
+	// "message", "sidestake", "claim", "mrc", "protocol", "scraper", or ""
+	// when the daemon itself could not classify it.
+	Type string `json:"type"`
 }
 
 // ValidateAddress is the response of the validateaddress RPC. We only need
