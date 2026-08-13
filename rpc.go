@@ -98,6 +98,18 @@ func (e *rpcError) Error() string {
 	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
 }
 
+// maxRPCResponseBytes caps how much of a daemon response Call will buffer, so
+// a hostile or impersonated daemon can't OOM the process with a multi-GB body
+// — the same guard selfupdate.go's maxDownloadBytes applies to release
+// downloads. The sizing constraint is listsinceblock with an empty cursor
+// (the full wallet history on first launch) and listreceivedbyaddress, which
+// tallies every address with its txid list: a decade-old always-staking
+// wallet measures in the tens of MB of JSON, so 128 MiB is severalfold
+// headroom over the largest legitimate response while staying survivable to
+// actually buffer (io.ReadAll briefly holds ~2x while growing) on the small
+// ARM boards this runs on.
+const maxRPCResponseBytes = 128 << 20
+
 // Call is the single entry point. Pass the method name, the positional
 // params, and a pointer to the struct you want the result decoded into.
 // Pass nil for `out` if you don't care about the return value (e.g.
@@ -134,9 +146,15 @@ func (c *RPCClient) Call(method string, params []any, out any) error {
 	}
 	defer resp.Body.Close() // always close the body when this function returns
 
-	raw, err := io.ReadAll(resp.Body)
+	// Read one byte past the cap so we can tell "exactly at the limit" from
+	// "over it" and fail loudly. Silently truncating instead would hand the
+	// JSON decoder half an envelope and surface as a baffling decode error.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxRPCResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
+	}
+	if len(raw) > maxRPCResponseBytes {
+		return fmt.Errorf("response larger than %d MiB, refusing to buffer it", maxRPCResponseBytes>>20)
 	}
 
 	// gridcoinresearchd returns the JSON-RPC envelope with a non-200 status on RPC

@@ -8,10 +8,11 @@ Shows:
 
 - **Balance** (confirmed / unconfirmed / immature / total, plus an immature stake row while a stake is maturing)
 - **Staking** status and difficulty
+- **Researcher stats** (whether the wallet crunches or is investor-only, plus magnitude and pending research reward for crunchers)
 - **Wallet lock** state with live unlock countdown
 - **Current block height**
 - **Your wallet addresses**, grouped into Mine / Others / All tabs, with labels and amounts received, and any address you do not actually own flagged so you never copy it by mistake
-- **Recent transactions** with human-readable status (`upcoming` / `incoming` / `sending` / `confirmed` / `stake`)
+- **Recent transactions** with human-readable status (`upcoming` / `incoming` / `sending` / `confirmed` / `stake`), including beacon advertisements, votes and other on-chain contracts, which the daemon otherwise reports as an anonymous send to nowhere
 - **Transaction details** (full txid, address, fee, block hash, timestamps), press `enter` on a selected row
 - **Send GRC** to any address, with pre-flight address validation and on-demand wallet unlock
 - **Sign messages** with any address you own (proves control of the address)
