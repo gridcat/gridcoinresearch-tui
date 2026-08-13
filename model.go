@@ -257,6 +257,15 @@ type Model struct {
 	// this. A missing key means "not resolved yet". See fetchAddrOwnership.
 	addrMine map[string]bool
 
+	// txContracts caches the Gridcoin contract type of a transaction, keyed
+	// by txid, because listsinceblock can't tell us (see
+	// IsContractCandidate). Three states, all meaningful: a missing key is
+	// "not looked up yet", an empty string is "looked up, carries no
+	// contract", and anything else is the type ("beacon", "vote", …).
+	// Contracts are immutable once mined, so a resolved entry never needs
+	// refreshing. See fetchContracts.
+	txContracts map[string]string
+
 	// txsLastBlock is the "lastblock" cursor returned by the previous
 	// listsinceblock call. Empty on first launch — an empty cursor tells
 	// the daemon to return the full wallet history. After the first
@@ -404,6 +413,7 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		inflight:       6,
 		spinnerRunning: true,
 		addrMine:       make(map[string]bool),
+		txContracts:    make(map[string]string),
 		// Default the polls screen to "all polls" (incl. finished); tab narrows
 		// it to active only. The lazy-tally caches start empty.
 		pollsShowFinished: true,
@@ -465,6 +475,22 @@ func (m Model) unknownOwnership() []string {
 	for _, a := range m.addresses {
 		if _, ok := m.addrMine[a.Address]; !ok {
 			out = append(out, a.Address)
+		}
+	}
+	return out
+}
+
+// uncachedContractTxIDs returns the txids of loaded transactions that look
+// like contracts but whose type hasn't been resolved yet, so callers can
+// fetch just those. The listsinceblock counterpart of unknownOwnership.
+func (m Model) uncachedContractTxIDs() []string {
+	var out []string
+	for _, tx := range m.txs {
+		if !IsContractCandidate(tx) {
+			continue
+		}
+		if _, ok := m.txContracts[tx.TxID]; !ok {
+			out = append(out, tx.TxID)
 		}
 	}
 	return out

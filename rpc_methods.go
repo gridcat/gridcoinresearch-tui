@@ -67,6 +67,16 @@ func (c *RPCClient) ListSinceBlock(blockHash string, targetConfirms int, include
 	return out, err
 }
 
+// GetTransaction fetches one wallet transaction by txid, for the sole purpose
+// of reading its Gridcoin contracts (see TxDetail). Cheap — a lookup in the
+// wallet's in-memory transaction map, no chain scan — so it is safe to call
+// in a serial batch, one txid at a time.
+func (c *RPCClient) GetTransaction(txid string) (TxDetail, error) {
+	var out TxDetail
+	err := c.Call("gettransaction", []any{txid}, &out)
+	return out, err
+}
+
 // ValidateAddress is the pre-flight check in the send flow. Cheaper than
 // attempting a sendtoaddress against a malformed recipient.
 func (c *RPCClient) ValidateAddress(addr string) (ValidateAddress, error) {
