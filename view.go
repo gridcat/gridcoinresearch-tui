@@ -1647,8 +1647,15 @@ func (m Model) renderTxDetailModal() string {
 	if tx.Fee != 0 {
 		lines = append(lines, field("Fee", feeStr))
 	}
+	lines = append(lines, field("Address", addr))
+	// listsinceblock does not include address-book labels. Match its address
+	// against the cached listreceivedbyaddress response so a normal payment's
+	// detail popup identifies a saved recipient without another RPC request.
+	// Address-less stake and contract entries naturally have no match.
+	if label := m.addressLabel(tx.Address); label != "" {
+		lines = append(lines, field("Label", sanitizeTerminal(label)))
+	}
 	lines = append(lines,
-		field("Address", addr),
 		field("TxID", sanitizeTerminal(tx.TxID)),
 		field("Confirmations", confLine),
 		field("Time", timeLine),
@@ -1675,6 +1682,21 @@ func (m Model) renderTxDetailModal() string {
 		Width(width).
 		Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+// addressLabel returns the wallet address-book label for address. Transaction
+// records have no label of their own, while the independently refreshed
+// addresses slice is the daemon's authoritative address-book view.
+func (m Model) addressLabel(address string) string {
+	if address == "" {
+		return ""
+	}
+	for _, known := range m.addresses {
+		if known.Address == address {
+			return known.DisplayLabel()
+		}
+	}
+	return ""
 }
 
 // renderHelpModal is the read-only cheat sheet opened with "?". It lists every
