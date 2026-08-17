@@ -299,6 +299,8 @@ func (m Model) View() string {
 		return m.renderTxDetailModal()
 	case modeEditLabel:
 		return m.renderEditLabelModal()
+	case modeAddLabel:
+		return m.renderAddLabelModal()
 	case modeHelp:
 		return m.renderHelpModal()
 	case modePolls:
@@ -1021,7 +1023,8 @@ func (m Model) renderTxList(height int) string {
 		// "(contract)", which reads correctly either way: still resolving,
 		// or a contract the daemon itself could not classify. Only the
 		// detail modal needs to tell the two apart.
-		line := renderTxRow(m.txs[i], m.anonymous, m.txContracts[m.txs[i].TxID])
+		tx := m.txs[i]
+		line := renderTxRowLabeled(tx, m.anonymous, m.txContracts[tx.TxID], m.addressLabel(tx.Address))
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
 			// tx list leaves the cursor as a silent bookmark, symmetric
@@ -1040,26 +1043,42 @@ func (m Model) renderTxList(height int) string {
 // Gridcoin contract kind for this txid ("beacon", "vote", …), or "" when it
 // is unknown or the transaction carries no contract; see Model.txContracts.
 func renderTxRow(tx Transaction, anonymous bool, contractType string) string {
+	return renderTxRowLabeled(tx, anonymous, contractType, "")
+}
+
+// renderTxRowLabeled renders a transaction row with an optional saved
+// counterparty label. The public wrapper above keeps callers that do not have
+// the address book cache (and focused row-render tests) straightforward.
+func renderTxRowLabeled(tx Transaction, anonymous bool, contractType, label string) string {
+	var b strings.Builder
+	for _, seg := range txRowSegments(tx, anonymous, contractType, label) {
+		b.WriteString(seg.style.Render(seg.text))
+	}
+	return b.String()
+}
+
+// txRowSegments builds the coloured runs for a transaction row. The optional
+// saved label is its own final column and is shortened to preserve the table's
+// compact, single-line layout.
+func txRowSegments(tx Transaction, anonymous bool, contractType, label string) []styledSeg {
 	st := ClassifyTransaction(tx)
 	iconStyle, ok := txKindStyle[st.Kind]
 	if !ok {
 		iconStyle = styleMuted
 	}
-	icon := iconStyle.Render(st.Icon)
-	status := styleTxStatusCol.Render(st.Label)
-
-	var amountCol string
+	var amount string
+	amountStyle := styleValue.Width(18).Align(lipgloss.Right)
 	if anonymous {
-		amountCol = styleTxAmountCol.Render(styleMuted.Render(MaskedAmount))
+		amount = MaskedAmount
+		amountStyle = styleMuted.Width(18).Align(lipgloss.Right)
 	} else {
-		amountStyle := styleValue
 		switch {
 		case tx.Amount < 0:
-			amountStyle = styleWarn
+			amountStyle = styleWarn.Width(18).Align(lipgloss.Right)
 		case tx.Amount > 0:
-			amountStyle = styleGood
+			amountStyle = styleGood.Width(18).Align(lipgloss.Right)
 		}
-		amountCol = styleTxAmountCol.Render(amountStyle.Render(FormatGRC(tx.Amount)))
+		amount = FormatGRC(tx.Amount)
 	}
 
 	addr := tx.Address
@@ -1079,14 +1098,36 @@ func renderTxRow(tx Transaction, anonymous bool, contractType string) string {
 	// Sanitized after the label is assembled, so the daemon-supplied contract
 	// type is covered along with tx.Address, and before ShortAddress so its
 	// length check counts the characters that will actually be printed.
-	addrCol := styleTxAddrCol.Render(ShortAddress(sanitizeTerminal(addr)))
+	segs := []styledSeg{
+		{st.Icon, iconStyle}, {" ", styleMuted},
+		{fixedCell(st.Label, 10, false), styleTxStatusCol}, {fixedCell(amount, 18, true), amountStyle}, {"  ", styleMuted},
+		{fixedCell(ShortAddress(sanitizeTerminal(addr)), 16, false), styleTxAddrCol}, {"  ", styleMuted},
+		{fixedCell(FormatRelativeTime(tx.Time), 12, false), styleTxTimeCol.Foreground(colorMuted)}, {"  ", styleMuted},
+		{fixedCell(sanitizeTerminal(tx.Category), 10, false), styleMuted},
+	}
+	if tx.Address != "" && label != "" {
+		// Keep the label column compact but give names substantially more room
+		// than an address abbreviation. It is the final column, so widening it
+		// never moves the aligned start of any other label.
+		segs = append(segs, styledSeg{"  ", styleMuted}, styledSeg{truncate(sanitizeTerminal(label), 18), styleMuted})
+	}
+	return segs
+}
 
-	timeCol := styleTxTimeCol.Render(styleMuted.Render(FormatRelativeTime(tx.Time)))
-	catCol := styleMuted.Render(sanitizeTerminal(tx.Category))
-
-	return lipgloss.JoinHorizontal(lipgloss.Top,
-		icon, " ", status, amountCol, "  ", addrCol, "  ", timeCol, "  ", catCol,
-	)
+// fixedCell pads a table cell before it becomes a styledSeg. Measuring raw
+// padded text (rather than relying only on lipgloss.Style.Width) is essential:
+// clipSegments needs the same column widths that the rendered row occupies.
+func fixedCell(text string, width int, rightAlign bool) string {
+	text = sliceByCols(text, 0, width)
+	pad := width - runewidth.StringWidth(text)
+	if pad <= 0 {
+		return text
+	}
+	spaces := strings.Repeat(" ", pad)
+	if rightAlign {
+		return spaces + text
+	}
+	return text + spaces
 }
 
 // renderPollsScreen is the full-screen governance polls list (mode "p"). It
@@ -1339,7 +1380,7 @@ func (m Model) renderFooter() string {
 	if m.anonymous {
 		anonLabel = "[a]non ●"
 	}
-	keys := []string{"[?]help", "[s]end", "sign [m]sg"}
+	keys := []string{"[?]help", "[s]end", "sign [m]sg", "[n]ew label"}
 	// [e]dit label only acts on the focused addresses panel, so surface it
 	// contextually rather than implying it works everywhere. (The 1/2/3 tab
 	// keys are self-documented in the panel's own tab bar.)
@@ -1369,6 +1410,38 @@ func (m Model) renderSendModal() string {
 	switch m.send.step {
 	case sendStepAddress:
 		body = "Recipient address:\n\n" + m.send.address.View()
+		recipients := m.sendRecipients()
+		if m.send.recipientOpen {
+			// Match the address panel: one clipped row per entry, with the
+			// same horizontal pan keys rather than wrapping long labels or
+			// addresses onto multiple lines.
+			const rowWidth = 50
+			maxScroll := m.addrMaxScroll(recipients, rowWidth)
+			hoff := min(m.send.recipientHScroll, maxScroll)
+			header := "Saved addresses:"
+			if maxScroll > 0 {
+				header += "  ←/→"
+			}
+			body += "\n\n" + styleLabel.Render(header)
+			const maxRows = 6
+			start := 0
+			if m.send.recipientCursor >= maxRows {
+				start = m.send.recipientCursor - maxRows + 1
+			}
+			end := min(start+maxRows, len(recipients))
+			for i := start; i < end; i++ {
+				a := recipients[i]
+				prefix := "  "
+				row := clipSegments(addressRowSegments(a, m.anonymous, m.ownership(a.Address)), hoff, rowWidth)
+				if i == m.send.recipientCursor {
+					prefix = styleAccent.Render("▸ ")
+					row = fillBackground(row, rowWidth)
+				}
+				body += "\n" + prefix + row
+			}
+			body += "\n\n" + styleMuted.Render("↑/↓ select · ←/→ pan · enter to use · esc to close")
+			break
+		}
 		if m.send.validating {
 			body += "\n\n" + styleMuted.Render("validating…")
 		} else if m.send.errMsg != "" {
@@ -1377,7 +1450,11 @@ func (m Model) renderSendModal() string {
 			// like any other — sanitized at every render below.
 			body += "\n\n" + styleBad.Render(sanitizeTerminal(m.send.errMsg))
 		} else {
-			body += "\n\n" + styleMuted.Render("enter to validate · esc to cancel")
+			if len(recipients) > 0 {
+				body += "\n\n" + styleMuted.Render("enter to validate · tab or ↓ for saved addresses · esc to cancel")
+			} else {
+				body += "\n\n" + styleMuted.Render("enter to validate · esc to cancel")
+			}
 		}
 	case sendStepAmount:
 		body = "Amount (GRC):\n\n" + m.send.amount.View()
@@ -1558,6 +1635,39 @@ func (m Model) renderEditLabelModal() string {
 		Width(modalWidth).
 		Render(header + "\n\n" + body)
 
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+func (m Model) renderAddLabelModal() string {
+	field := func(title string, active bool, value string) string {
+		label := styleLabel.Render(title)
+		if active {
+			label = styleAccent.Render("▸ " + title)
+		}
+		return label + "\n\n" + value
+	}
+	body := field("Address (could be any address, not just own):", m.add.focused == addLabelAddress, m.add.address.View()) + "\n\n" +
+		field("Label:", m.add.focused == addLabelName, m.add.label.View())
+	if m.add.validating {
+		body += "\n\n" + styleMuted.Render("validating address…")
+	} else if m.add.busy {
+		body += "\n\n" + styleMuted.Render("saving…")
+	} else if m.add.errMsg != "" {
+		body += "\n\n" + styleBad.Render(sanitizeTerminal(m.add.errMsg))
+	} else {
+		body += "\n\n" + styleMuted.Render("enter to save · tab to switch fields · esc to cancel")
+	}
+
+	modalWidth := 72
+	if max := m.width - 2; modalWidth > max && max > 0 {
+		modalWidth = max
+	}
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(modalWidth).
+		Render(styleTitle.Render("Add address label") + "\n\n" + body)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -1794,7 +1904,7 @@ func (m Model) renderHelpModal() string {
 		styleTitle.Render("Help"),
 		styleMuted.Render("A read-only view of a running Gridcoin wallet: balance, staking,"),
 		styleMuted.Render("lock, block height, your addresses, and recent transactions."),
-		styleMuted.Render("You can also send coins, sign a message, or relabel an address."),
+		styleMuted.Render("You can also send coins, sign a message, or manage address labels."),
 		"",
 		styleTitle.Render("Move around"),
 		keyRow("↑ ↓  k j", "Move the cursor in the focused panel"),
@@ -1807,10 +1917,11 @@ func (m Model) renderHelpModal() string {
 		keyRow("1 2 3", "Show Mine, Others, or All addresses"),
 		keyRow("+ −", "Grow or shrink the panel; 0 resets it"),
 		keyRow("e", "Rename the selected address (blank clears it)"),
+		keyRow("n", "Add a labeled address-book entry"),
 		"",
 		styleTitle.Render("Do things"),
 		keyRow("Enter", "Open the selected transaction in full"),
-		keyRow("s", "Send GRC (checks the address, unlocks only if needed)"),
+		keyRow("s", "Send GRC (choose a saved label or type an address)"),
 		keyRow("m", "Sign a message with one of your addresses"),
 		keyRow("p", "Browse on-chain governance polls (tab: all / active)"),
 		keyRow("c", "Change host, port, login, or refresh for this session"),

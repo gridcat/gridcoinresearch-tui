@@ -99,6 +99,13 @@ type signResultMsg struct {
 type setLabelResultMsg struct {
 	err error
 }
+type addLabelValidateMsg struct {
+	v   ValidateAddress
+	err error
+}
+type addLabelResultMsg struct {
+	err error
+}
 
 // pollsMsg carries the result of a listpolls fetch (the whole list). It echoes
 // back the includeFinished scope the request was issued with so the handler can
@@ -265,7 +272,7 @@ func fetchTxs(rpc *RPCClient, lastBlock string) tea.Cmd {
 
 func fetchAddrs(rpc *RPCClient) tea.Cmd {
 	return func() tea.Msg {
-		a, err := rpc.ListReceivedByAddress()
+		a, err := rpc.ListAddressBook()
 		return addrsMsg{a, err}
 	}
 }
@@ -513,6 +520,19 @@ func runSign(rpc *RPCClient, addr, message, passphrase string, needsUnlock bool)
 func runSetLabel(rpc *RPCClient, addr, label string) tea.Cmd {
 	return func() tea.Msg {
 		return setLabelResultMsg{err: rpc.SetAccount(addr, label)}
+	}
+}
+
+func validateAddLabelAddress(rpc *RPCClient, addr string) tea.Cmd {
+	return func() tea.Msg {
+		v, err := rpc.ValidateAddress(addr)
+		return addLabelValidateMsg{v: v, err: err}
+	}
+}
+
+func runAddLabel(rpc *RPCClient, addr, label string) tea.Cmd {
+	return func() tea.Msg {
+		return addLabelResultMsg{err: rpc.SetAccount(addr, label)}
 	}
 }
 
@@ -797,6 +817,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		spin := m.bumpInflight(1)
 		return m, tea.Batch(fetchAddrs(m.rpc), spin)
 
+	case addLabelValidateMsg:
+		m.add.validating = false
+		if msg.err != nil {
+			m.add.errMsg = msg.err.Error()
+			return m, nil
+		}
+		if !msg.v.IsValid {
+			m.add.errMsg = "address is not valid"
+			return m, nil
+		}
+		m.add.busy = true
+		m.add.errMsg = ""
+		return m, runAddLabel(m.rpc, m.add.address.Value(), m.add.label.Value())
+
+	case addLabelResultMsg:
+		m.add.busy = false
+		if msg.err != nil {
+			m.add.errMsg = msg.err.Error()
+			return m, nil
+		}
+		m.add.blurAll()
+		m.mode = modeDashboard
+		spin := m.bumpInflight(1)
+		return m, tea.Batch(fetchAddrs(m.rpc), spin)
+
 	case pollsMsg:
 		m.finishFetch()
 		// Drop a reply whose scope no longer matches what the screen is now
@@ -931,6 +976,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case modeEditLabel:
 		return m.handleEditLabelKey(msg)
+	case modeAddLabel:
+		return m.handleAddLabelKey(msg)
 	case modeHelp:
 		// The help sheet is read-only; any key dismisses it.
 		m.mode = modeDashboard
@@ -978,6 +1025,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.openEditLabelModal()
 		}
 		return m, nil
+	case "n":
+		m.openAddLabelModal()
+		return m, nil
 	case "c":
 		m.openConfigModal()
 		return m, nil
@@ -1007,17 +1057,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.focusedArea = focusTx
 		}
-		// Start each visit to the addresses panel from the left edge.
+		// Start each visit to the address panel from the left edge.
 		m.addrHScroll = 0
 		return m, nil
 	case "left", "h":
-		// Pan the addresses panel left. Other panels don't scroll horizontally.
 		if m.focusedArea == focusAddr && m.addrHScroll > 0 {
 			m.addrHScroll--
 		}
 		return m, nil
 	case "right", "l":
-		// Pan the addresses panel right, clamped to the widest visible row.
 		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.visibleAddresses(), m.panelRowWidth()) {
 			m.addrHScroll++
 		}
@@ -1219,17 +1267,18 @@ func clampCursor(c, length int) int {
 	return c
 }
 
-// openSendModal resets the send wizard to step 0 and focuses the address
-// field. It preserves the existing textinput.Model instances so their
-// placeholder / width / mask settings survive.
+// openSendModal resets the send wizard and focuses the address field. It
+// preserves the existing textinput.Model instances so their placeholder /
+// width / mask settings survive.
 func (m *Model) openSendModal() {
 	m.mode = modeSend
 	m.send = sendState{
-		step:        sendStepAddress,
-		address:     m.send.address,
-		amount:      m.send.amount,
-		passphrase:  m.send.passphrase,
-		needsUnlock: m.wallet.IsLocked(),
+		step:            sendStepAddress,
+		recipientCursor: 0,
+		address:         m.send.address,
+		amount:          m.send.amount,
+		passphrase:      m.send.passphrase,
+		needsUnlock:     m.wallet.IsLocked(),
 	}
 	m.send.address.SetValue("")
 	m.send.amount.SetValue("")
@@ -1241,6 +1290,12 @@ func (m *Model) openSendModal() {
 // state machine: the current m.send.step decides which keys do what.
 func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	if m.send.recipientOpen && key == "esc" {
+		m.send.recipientOpen = false
+		m.send.recipientHScroll = 0
+		m.send.address.Focus()
+		return m, nil
+	}
 	if key == "esc" || key == "ctrl+c" {
 		m.mode = modeDashboard
 		m.send.blurAll()
@@ -1249,8 +1304,51 @@ func (m Model) handleSendKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.send.busy {
 		return m, nil // ignore input while the final send RPC is in flight
 	}
+	if m.send.validating {
+		return m, nil // do not race multiple validateaddress requests
+	}
 	switch m.send.step {
 	case sendStepAddress:
+		recipients := m.sendRecipients()
+		if m.send.recipientOpen {
+			switch key {
+			case "left", "h":
+				if m.send.recipientHScroll > 0 {
+					m.send.recipientHScroll--
+				}
+			case "right", "l":
+				if m.send.recipientHScroll < m.addrMaxScroll(recipients, 50) {
+					m.send.recipientHScroll++
+				}
+			case "up", "k":
+				if m.send.recipientCursor > 0 {
+					m.send.recipientCursor--
+				}
+			case "down", "j":
+				if m.send.recipientCursor < len(recipients)-1 {
+					m.send.recipientCursor++
+				}
+			case "home", "g":
+				m.send.recipientCursor = 0
+			case "end", "G":
+				if len(recipients) > 0 {
+					m.send.recipientCursor = len(recipients) - 1
+				}
+			case "enter", "tab", "shift+tab":
+				if m.send.recipientCursor < len(recipients) {
+					m.send.address.SetValue(recipients[m.send.recipientCursor].Address)
+				}
+				m.send.recipientOpen = false
+				m.send.address.Focus()
+			}
+			return m, nil
+		}
+		if (key == "tab" || key == "down") && len(recipients) > 0 {
+			m.send.recipientOpen = true
+			m.send.recipientHScroll = 0
+			m.send.address.Blur()
+			return m, nil
+		}
 		if key == "enter" {
 			// Fire a validate RPC; the validateMsg handler advances the step.
 			if v := m.send.address.Value(); v != "" {
@@ -1499,6 +1597,74 @@ func (m Model) handleEditLabelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.edit.label, cmd = m.edit.label.Update(msg)
+	return m, cmd
+}
+
+// openAddLabelModal prepares a blank address-book form. The daemon accepts
+// labels for external recipient addresses as well as wallet-owned ones, so
+// this is intentionally available regardless of the focused dashboard panel.
+func (m *Model) openAddLabelModal() {
+	m.mode = modeAddLabel
+	m.add = addLabelState{address: m.add.address, label: m.add.label}
+	m.add.address.SetValue("")
+	m.add.label.SetValue("")
+	m.add.address.Focus()
+}
+
+func (m *Model) focusAddLabelField(field addLabelField) {
+	m.add.blurAll()
+	m.add.focused = field
+	if field == addLabelAddress {
+		m.add.address.Focus()
+	} else {
+		m.add.label.Focus()
+	}
+}
+
+// handleAddLabelKey edits the two-field address-book form. Saving always
+// validates the current address first, so a user can return to and change it
+// after filling the label without bypassing validation.
+func (m Model) handleAddLabelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	if key == "esc" || key == "ctrl+c" {
+		m.mode = modeDashboard
+		m.add.blurAll()
+		return m, nil
+	}
+	if m.add.validating || m.add.busy {
+		return m, nil
+	}
+	switch key {
+	case "tab", "down":
+		m.focusAddLabelField((m.add.focused + 1) % 2)
+		return m, nil
+	case "shift+tab", "up":
+		m.focusAddLabelField((m.add.focused - 1 + 2) % 2)
+		return m, nil
+	case "enter":
+		if m.add.focused == addLabelAddress {
+			m.focusAddLabelField(addLabelName)
+			return m, nil
+		}
+		if m.add.address.Value() == "" {
+			m.add.errMsg = "address is required"
+			m.focusAddLabelField(addLabelAddress)
+			return m, nil
+		}
+		if m.add.label.Value() == "" {
+			m.add.errMsg = "label is required"
+			return m, nil
+		}
+		m.add.errMsg = ""
+		m.add.validating = true
+		return m, validateAddLabelAddress(m.rpc, m.add.address.Value())
+	}
+	var cmd tea.Cmd
+	if m.add.focused == addLabelAddress {
+		m.add.address, cmd = m.add.address.Update(msg)
+	} else {
+		m.add.label, cmd = m.add.label.Update(msg)
+	}
 	return m, cmd
 }
 
