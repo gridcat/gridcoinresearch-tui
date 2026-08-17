@@ -988,6 +988,44 @@ func listWindow(height, cursor, total int) (maxRows, offset int) {
 	return maxRows, offset
 }
 
+// txListRows returns the number of transaction rows that fit in the current
+// dashboard layout. Key handling uses it to preserve the visible transaction
+// window between frames.
+func (m Model) txListRows() int {
+	available := m.availableBodyHeight()
+	addrs := m.renderAddresses(m.addrPanelHeight(available))
+	txHeight := available - lipgloss.Height(addrs)
+	if txHeight < 3 {
+		txHeight = 3
+	}
+	maxRows, _ := listWindow(txHeight, 0, len(m.txs))
+	return maxRows
+}
+
+// txWindowOffset keeps the stored transaction window valid for the current
+// layout and cursor. Moving up traverses the visible rows before scrolling the
+// list once the cursor reaches the top.
+func (m Model) txWindowOffset(maxRows int) int {
+	maxOffset := len(m.txs) - maxRows
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	offset := m.txOffset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	if m.txCursor < offset {
+		offset = m.txCursor
+	}
+	if m.txCursor >= offset+maxRows {
+		offset = m.txCursor - maxRows + 1
+	}
+	return offset
+}
+
 // renderTxList draws the scrollable transactions panel, sized to fill the
 // vertical space that renderDashboard handed it. Scroll math:
 //
@@ -1014,7 +1052,8 @@ func (m Model) renderTxList(height int) string {
 		return boxStyle.Render(title + "\n" + styleMuted.Render("no transactions yet"))
 	}
 
-	maxRows, offset := listWindow(height, m.txCursor, len(m.txs))
+	maxRows, _ := listWindow(height, m.txCursor, len(m.txs))
+	offset := m.txWindowOffset(maxRows)
 	lines := []string{title}
 	for i := offset; i < offset+maxRows && i < len(m.txs); i++ {
 		prefix := "  "

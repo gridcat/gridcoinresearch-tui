@@ -1242,6 +1242,9 @@ func (m *Model) focusedList() (*int, int) {
 func (m *Model) scrollBy(delta int) {
 	cursor, length := m.focusedList()
 	*cursor = clampCursor(*cursor+delta, length)
+	if m.focusedArea == focusTx {
+		m.txOffset = m.txWindowOffset(m.txListRows())
+	}
 }
 
 // scrollTo jumps the cursor of the currently-focused list to an absolute
@@ -1250,6 +1253,9 @@ func (m *Model) scrollBy(delta int) {
 func (m *Model) scrollTo(pos int) {
 	cursor, length := m.focusedList()
 	*cursor = clampCursor(pos, length)
+	if m.focusedArea == focusTx {
+		m.txOffset = m.txWindowOffset(m.txListRows())
+	}
 }
 
 // clampCursor pins a desired cursor position to the valid range

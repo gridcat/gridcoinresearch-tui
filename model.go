@@ -334,12 +334,12 @@ type Model struct {
 	// Which scrollable panel the arrow/page keys drive.
 	focusedArea focusArea
 
-	// Cursors for the two scrollable lists. The "offset" (top-of-window
-	// index) is intentionally NOT stored on the Model — render functions
-	// receive m by value, so any write to an offset field would be
-	// discarded on return anyway. Each render recomputes the offset
-	// deterministically from the current cursor and the available rows.
+	// Cursors for the two scrollable lists. txOffset is the first visible
+	// transaction. It is stored so, after moving down through a long list,
+	// moving up first moves the cursor up the already visible rows before the
+	// list itself scrolls.
 	txCursor   int
+	txOffset   int
 	addrCursor int
 
 	// addrHScroll is the horizontal column offset for the My Addresses panel,
