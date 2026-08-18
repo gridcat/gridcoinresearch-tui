@@ -4,10 +4,12 @@
 // GetWalletInfo() and get back a WalletInfo struct the compiler understands.
 //
 // If you want to add a new RPC:
-//   1. Add a response struct to rpc_types.go (or reuse an existing one)
-//   2. Add a one-line wrapper here that calls c.Call(method, params, &out)
-//   3. Use it from update.go in a fetchXyz command
+//  1. Add a response struct to rpc_types.go (or reuse an existing one)
+//  2. Add a one-line wrapper here that calls c.Call(method, params, &out)
+//  3. Use it from update.go in a fetchXyz command
 package main
+
+import "sort"
 
 // GetWalletInfo fetches balance / staking flag / unlocked-until state.
 // Called on every refresh tick to keep the stats panel up to date.
@@ -132,6 +134,55 @@ func (c *RPCClient) ListReceivedByAddress() ([]ReceivedAddress, error) {
 	var out []ReceivedAddress
 	err := c.Call("listreceivedbyaddress", []any{0, true, true}, &out)
 	return out, err
+}
+
+// ListAddressBook combines the receiving-address list with the legacy account
+// address book. listreceivedbyaddress only enumerates receiving addresses, so
+// an external destination saved with setaccount can be absent even with
+// include_empty enabled. listaccounts plus getaddressesbyaccount exposes those
+// labeled recipients. Older daemons can disable the account RPCs; in that case
+// the receiving list remains a useful, backwards-compatible fallback.
+func (c *RPCClient) ListAddressBook() ([]ReceivedAddress, error) {
+	addresses, err := c.ListReceivedByAddress()
+	if err != nil {
+		return nil, err
+	}
+
+	var accounts map[string]float64
+	if err := c.Call("listaccounts", []any{0, true}, &accounts); err != nil {
+		return addresses, nil
+	}
+
+	labels := make([]string, 0, len(accounts))
+	for label := range accounts {
+		if label != "" {
+			labels = append(labels, label)
+		}
+	}
+	sort.Strings(labels)
+
+	byAddress := make(map[string]int, len(addresses))
+	for i, a := range addresses {
+		byAddress[a.Address] = i
+	}
+	for _, label := range labels {
+		var accountAddresses []string
+		if err := c.Call("getaddressesbyaccount", []any{label}, &accountAddresses); err != nil {
+			continue
+		}
+		for _, address := range accountAddresses {
+			if i, ok := byAddress[address]; ok {
+				// Modern daemons populate Label; preserve it when available.
+				if addresses[i].DisplayLabel() == "" {
+					addresses[i].Account = label
+				}
+				continue
+			}
+			byAddress[address] = len(addresses)
+			addresses = append(addresses, ReceivedAddress{Address: address, Account: label})
+		}
+	}
+	return addresses, nil
 }
 
 // ListPolls returns the current governance polls. The single boolean is

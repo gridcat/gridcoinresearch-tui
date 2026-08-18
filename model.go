@@ -31,6 +31,7 @@ const (
 	modeConfig                     // the runtime config editor modal
 	modeTxDetail                   // a modal showing one transaction in detail
 	modeEditLabel                  // the "edit address label" modal
+	modeAddLabel                   // the "add address label" modal
 	modeHelp                       // the keybinding / capability cheat sheet
 	modePolls                      // the full-screen governance polls list
 	modePollDetail                 // a modal showing one poll in full (opened from modePolls)
@@ -96,7 +97,7 @@ type configState struct {
 type sendStep int
 
 const (
-	sendStepAddress    sendStep = iota // type + validate the recipient
+	sendStepAddress    sendStep = iota // type or choose + validate the recipient
 	sendStepAmount                     // type the amount
 	sendStepPassphrase                 // only used when the wallet is encrypted + locked
 	sendStepConfirm                    // show "are you sure?"
@@ -107,17 +108,22 @@ const (
 // once the user leaves the amount step so the confirm view doesn't have
 // to re-parse the string.
 type sendState struct {
-	step        sendStep
-	address     textinput.Model
-	amount      textinput.Model
-	passphrase  textinput.Model
-	amountValue float64 // parsed once when leaving the amount step
-	needsUnlock bool    // true if the daemon says the wallet is currently locked
-	validating  bool    // true while an address validateaddress RPC is in flight
-	errMsg      string  // per-step validation / RPC error message
-	busy        bool    // true while the final send command is running
-	resultTxID  string  // populated in sendStepResult on success
-	resultErr   string  // populated in sendStepResult on failure
+	step sendStep
+	// recipientOpen controls the saved-recipient dropdown. recipientCursor
+	// indexes Model.sendRecipients(), which contains only labeled entries.
+	recipientOpen    bool
+	recipientCursor  int
+	recipientHScroll int
+	address          textinput.Model
+	amount           textinput.Model
+	passphrase       textinput.Model
+	amountValue      float64 // parsed once when leaving the amount step
+	needsUnlock      bool    // true if the daemon says the wallet is currently locked
+	validating       bool    // true while an address validateaddress RPC is in flight
+	errMsg           string  // per-step validation / RPC error message
+	busy             bool    // true while the final send command is running
+	resultTxID       string  // populated in sendStepResult on success
+	resultErr        string  // populated in sendStepResult on failure
 }
 
 // blurAll takes focus away from every input in the send state. Called when
@@ -176,6 +182,31 @@ type editLabelState struct {
 }
 
 func (s *editLabelState) blurAll() {
+	s.label.Blur()
+}
+
+// addLabelField identifies the active input in the add-address-label modal.
+type addLabelField int
+
+const (
+	addLabelAddress addLabelField = iota
+	addLabelName
+)
+
+// addLabelState is the two-field form for saving an arbitrary address-book
+// entry. Unlike editLabelState, both inputs are editable because the address
+// does not need to be present in the current wallet address list.
+type addLabelState struct {
+	focused    addLabelField
+	address    textinput.Model
+	label      textinput.Model
+	validating bool
+	busy       bool
+	errMsg     string
+}
+
+func (s *addLabelState) blurAll() {
+	s.address.Blur()
 	s.label.Blur()
 }
 
@@ -303,12 +334,12 @@ type Model struct {
 	// Which scrollable panel the arrow/page keys drive.
 	focusedArea focusArea
 
-	// Cursors for the two scrollable lists. The "offset" (top-of-window
-	// index) is intentionally NOT stored on the Model — render functions
-	// receive m by value, so any write to an offset field would be
-	// discarded on return anyway. Each render recomputes the offset
-	// deterministically from the current cursor and the available rows.
+	// Cursors for the two scrollable lists. txOffset is the first visible
+	// transaction. It is stored so, after moving down through a long list,
+	// moving up first moves the cursor up the already visible rows before the
+	// list itself scrolls.
 	txCursor   int
+	txOffset   int
 	addrCursor int
 
 	// addrHScroll is the horizontal column offset for the My Addresses panel,
@@ -370,6 +401,7 @@ type Model struct {
 	sign signState
 	conf configState
 	edit editLabelState
+	add  addLabelState
 }
 
 // NewModel constructs the initial Model. This is where the one-time setup
@@ -401,6 +433,16 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 	labelInput.CharLimit = 128
 	labelInput.Width = 50
 
+	addAddress := textinput.New()
+	addAddress.Placeholder = "S-address"
+	addAddress.CharLimit = 64
+	addAddress.Width = 50
+
+	addLabel := textinput.New()
+	addLabel.Placeholder = "label"
+	addLabel.CharLimit = 128
+	addLabel.Width = 50
+
 	return Model{
 		cfg: cfg,
 		rpc: rpc,
@@ -424,6 +466,7 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		sign:              signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
 		conf:              newConfigState(cfg),
 		edit:              editLabelState{label: labelInput},
+		add:               addLabelState{address: addAddress, label: addLabel},
 	}
 }
 
@@ -511,6 +554,20 @@ func (m Model) visibleAddresses() []ReceivedAddress {
 	var out []ReceivedAddress
 	for _, a := range m.addresses {
 		if (m.ownership(a.Address) == ownForeign) == wantForeign {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// sendRecipients returns labeled address-book entries for the send wizard.
+// Unlabeled wallet addresses are deliberately omitted: the picker is for the
+// destinations a user has saved a name for, while the manual option accepts
+// every valid Gridcoin address.
+func (m Model) sendRecipients() []ReceivedAddress {
+	var out []ReceivedAddress
+	for _, a := range m.addresses {
+		if a.DisplayLabel() != "" {
 			out = append(out, a)
 		}
 	}

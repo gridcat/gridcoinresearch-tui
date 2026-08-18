@@ -355,3 +355,32 @@ func TestRenderTxDetailContract(t *testing.T) {
 		t.Errorf("a plain receive should have no contract rendering at all, got:\n%s", out)
 	}
 }
+
+// TestRenderTxDetailAddressLabel ensures the transaction popup joins a normal
+// payment to the cached wallet address book. listsinceblock does not return
+// labels itself, so this is deliberately a lookup rather than a new RPC call.
+func TestRenderTxDetailAddressLabel(t *testing.T) {
+	const address = "SGrcPayeeAddr9x8y7z6w5v4u3t2s1rQpZ"
+	tx := Transaction{Category: "send", Address: address, TxID: "labelled", Amount: -1}
+	newModel := func(label string) Model {
+		return Model{
+			width: 100, height: 30, txs: []Transaction{tx}, txCursor: 0,
+			addresses: []ReceivedAddress{{Address: address, Account: label}},
+		}
+	}
+
+	out := newModel("household wallet").renderTxDetailModal()
+	if !strings.Contains(out, "Label") || !strings.Contains(out, "household wallet") {
+		t.Errorf("transaction detail should show the cached address label, got:\n%s", out)
+	}
+
+	out = newModel("").renderTxDetailModal()
+	if strings.Contains(out, "Label") {
+		t.Errorf("transaction detail should omit an empty label, got:\n%s", out)
+	}
+
+	out = newModel("saved\x1b[31m recipient").renderTxDetailModal()
+	if strings.Contains(out, "\x1b[31m") || !strings.Contains(out, "saved[31m recipient") {
+		t.Errorf("transaction detail should sanitize the cached label, got:\n%s", out)
+	}
+}
