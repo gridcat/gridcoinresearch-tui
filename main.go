@@ -83,6 +83,11 @@ func main() {
 		}
 	}
 
+	// termenv v0.15.2 does not recognise plain TERM=xterm on Unix. Apply a
+	// conservative ANSI fallback before anything renders, while preserving
+	// explicit color opt-outs and every stronger profile it already detected.
+	configureTerminalColorProfile()
+
 	// Paint the chrome for the resolved network before the first frame, so a
 	// testnet window is recognisable at a glance among mainnet ones.
 	applyNetworkPalette(cfg.Testnet)

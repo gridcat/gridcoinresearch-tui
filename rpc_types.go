@@ -50,11 +50,24 @@ type BlockchainInfo struct {
 }
 
 // PeerInfo is one entry from getpeerinfo. The daemon returns one object per
-// connected peer with plenty of detail (address, version, ping…); the TUI
-// only needs the Inbound flag to split the header's peer count into
-// inbound/outbound, so per the file convention that's all we decode.
+// connected peer with plenty of detail (address, version, ping…); per the
+// file convention we decode only what the TUI actually uses.
+//
+// Inbound splits the header's peer count into inbound/outbound.
+//
+// Addr is the peer's address, kept solely for the opt-in peer sharing in
+// telemetry.go. It is only meaningful for OUTBOUND connections, where it is
+// the address we dialled and therefore a real listening endpoint; for inbound
+// ones it carries an ephemeral source port. Note this is the only field here
+// that describes a third party rather than our own connection state, which is
+// why it never leaves the process unless the user has said yes.
+//
+// Subver is deliberately NOT decoded: the consent screen promises we do not
+// send peer version strings, and the simplest way to keep that promise is to
+// never hold them.
 type PeerInfo struct {
-	Inbound bool `json:"inbound"`
+	Inbound bool   `json:"inbound"`
+	Addr    string `json:"addr"`
 }
 
 // StakingInfo matches getstakinginfo. Field tags that look weird (with

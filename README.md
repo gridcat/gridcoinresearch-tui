@@ -95,6 +95,8 @@ every style picks it up automatically.
 | `--conf PATH` | — | `~/.GridcoinResearch[/testnet]/gridcoinresearch.conf` | Best-effort; missing file is fine. |
 | `--refresh DUR` | — | `10s` | How often to poll the daemon. |
 | `--debug-log PATH` | — | empty | Redirect stderr to a file so crash dumps land there instead of wrecking the terminal. See [Troubleshooting](#troubleshooting). |
+| `--no-update-check` | `GRC_NO_UPDATE_CHECK` | off | Disable the background release check. The manual `u` key still works. |
+| `--peer-sharing on\|off` | `GRC_PEER_SHARING` | ask once | Opt in or out of [peer sharing](#peer-sharing) without being asked. Overrides the saved answer for that run and is not written back, which is what makes it safe in a script or container. |
 
 Flags accept both single- and double-dash forms (`-testnet` and `--testnet` are equivalent), to match Go's standard flag parser. `--help` prints the single-dash form by convention.
 
@@ -110,6 +112,7 @@ Resolution order, highest wins: **flag → env var → conf file → built-in de
 | `enter` | Open details for the selected transaction |
 | `g` / `G` / `home` / `end` | Jump to first / last row in the focused panel |
 | `1` / `2` / `3` | Filter the My Addresses panel: Mine / Others / All |
+| `/` | Search the active address tab by label or address; `enter` keeps the search and `esc` clears it |
 | `+` / `=` / `-` | Grow / shrink the My Addresses panel (moves the split with the transactions list) |
 | `0` | Reset the panel split to its automatic size |
 | `s` | Open the send dialog |
@@ -130,7 +133,7 @@ When sending, type a recipient address as usual, or press `tab` or `↓` to open
 
 ## Addresses
 
-The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Each row shows the address plus its label, watch-only flag, and amount received. Some rows are flagged `⚠ not yours` in red: these are addresses you have only labelled but do not actually own (for example, someone else's address you saved as a send target). They turn up here because `listreceivedbyaddress` hands back your whole address book rather than just your own keys; the flag comes straight from the daemon's own `validateaddress` `ismine` answer, so you never copy a foreign address thinking it is one of yours. Those foreign rows live under the **Others** tab: the panel opens on **Mine** (your own addresses, plus any whose ownership the daemon has not resolved yet) so they don't clutter the common case, and **All** shows everything together. Press `1`, `2`, `3` to switch tabs; each shows its own count in the header. Rows that are too wide for the panel are clipped rather than wrapped (a muted `‹`/`›` marks hidden content); focus the panel with `tab` and use `←`/`→` to pan sideways and read the rest. Press `e` on the selected address to set or change its label (an empty value clears it); the change is written to the wallet via `setaccount` and shown after the next refresh. Press `n` to add a new address-book entry: enter a valid address and a non-empty label, then the TUI saves it through the same RPC. One quirk worth knowing: when you relabel an address that is its account's current receiving address, gridcoinresearchd also generates a fresh replacement address that keeps the old label. That is Gridcoin's legacy account system rather than anything the TUI does (the Qt wallet sidesteps it only by setting labels in-process, and Gridcoin exposes no label RPC that skips the behaviour); no coins are affected, you simply end up with one extra address. At normal terminal widths the address itself always fits, so you can still mouse-select and copy it with your terminal's native shortcut. The panel shares vertical space with the transactions list: it opens at about a third of what's available, with a `current/total` indicator in its header when it can't show every row at once. Press `+`/`-` to grow or shrink that split and `0` to snap back to the automatic size; once you have resized it the panel holds its height (padding with blank rows) so it stays put as you switch tabs, and it can never squeeze the transactions list below three rows. Resizing the terminal taller gives both panels more room.
+The "My Addresses" panel lists every address `listreceivedbyaddress` returns for your wallet, including ones that have never received any coins. Each row shows the address plus its label, watch-only flag, and amount received. Some rows are flagged `⚠ not yours` in red: these are addresses you have only labelled but do not actually own (for example, someone else's address you saved as a send target). They turn up here because `listreceivedbyaddress` hands back your whole address book rather than just your own keys; the flag comes straight from the daemon's own `validateaddress` `ismine` answer, so you never copy a foreign address thinking it is one of yours. Those foreign rows live under the **Others** tab: the panel opens on **Mine** (your own addresses, plus any whose ownership the daemon has not resolved yet) so they don't clutter the common case, and **All** shows everything together. Press `1`, `2`, `3` to switch tabs; each shows its own count in the header. Press `/` from anywhere on the dashboard to focus the address panel and search its active tab as you type; like the same search key in Vim and `less`, it passes straight through tmux without conflicting with tmux's prefix. The search checks both labels and addresses: label matching is case-insensitive, while address matching preserves case because Gridcoin addresses are case-sensitive. Press `enter` to keep the search while navigating or editing matching rows, `/` to change it, and `esc` to clear it. Rows that are too wide for the panel are clipped rather than wrapped (a muted `‹`/`›` marks hidden content); focus the panel with `tab` and use `←`/`→` to pan sideways and read the rest. Press `e` on the selected address to set or change its label (an empty value clears it); the change is written to the wallet via `setaccount` and shown after the next refresh. Press `n` to add a new address-book entry: enter a valid address and a non-empty label, then the TUI saves it through the same RPC. One quirk worth knowing: when you relabel an address that is its account's current receiving address, gridcoinresearchd also generates a fresh replacement address that keeps the old label. That is Gridcoin's legacy account system rather than anything the TUI does (the Qt wallet sidesteps it only by setting labels in-process, and Gridcoin exposes no label RPC that skips the behaviour); no coins are affected, you simply end up with one extra address. At normal terminal widths the address itself always fits, so you can still mouse-select and copy it with your terminal's native shortcut. The panel shares vertical space with the transactions list: it opens at about a third of what's available, with a `current/total` indicator in its header when it can't show every row at once. Press `+`/`-` to grow or shrink that split and `0` to snap back to the automatic size; once you have resized it the panel holds its height (padding with blank rows) so it stays put as you switch tabs, and it can never squeeze the transactions list below three rows. Resizing the terminal taller gives both panels more room.
 
 ## Sign messages
 
@@ -144,10 +147,31 @@ The wallet is only unlocked when it has to be, an unencrypted wallet, or one you
 
 Edits in the config panel are **session-only**, they apply immediately (the RPC client is rebuilt against the new endpoint and a fresh fetch runs) but are not written to disk. Next launch re-resolves from flags/env/conf as usual. Toggling the network auto-updates the port field if it still held the old network's default, so you don't need to remember port numbers.
 
+The one exception is the **Peer sharing** row, which is written to disk. A consent decision the program forgets on exit is not a decision, and re-asking every launch would be nagging rather than consent.
+
+## Peer sharing
+
+**Off unless you turn it on.** You are asked once, on first run, and your answer is remembered.
+
+gridcoin.club publishes a list of reachable Gridcoin peers that new wallets use to find the network. If you opt in, the TUI periodically sends the addresses of the peers your node dialled **out** to. That gives the list a second vantage point: a node that answers from the list's own server may still be firewalled from where you are, and only a real wallet somewhere else can tell the difference.
+
+A report contains:
+
+- the IP and port of peers this node connected out to
+- a random identifier your wallet generated locally, so repeat reports can be counted without identifying you
+- this wallet's version
+
+It does **not** contain your addresses, balances or transactions, your CPID or anything about your BOINC work, your own IP address, or your peers' version strings. Only outbound peers are shared: an inbound peer's address carries an ephemeral source port that nothing can connect back to, so sharing it would just add dead entries to a public list. Private, loopback, CGNAT and documentation addresses are filtered out before anything is sent.
+
+Reports go to `addnodes.gridcoin.club` about once an hour, and only while the TUI is open. Nothing is sent in the background when the program is not running.
+
+To change your mind, press `c` and toggle **Peer sharing**, or start with `--peer-sharing=off`. The saved answer lives in `state.json` under your OS config directory (`~/.config/gridcoinresearch-tui/` on Linux); deleting that file resets both the answer and the random identifier.
+
 ## Security notes
 
 - The TUI never stores your wallet passphrase. It is held in memory only for the duration of a single `sendtoaddress` call, then the wallet is immediately re-locked via `walletlock`.
 - Pass `--rpc-password` via env var, not the command line, flags are visible in `ps`. Or omit it entirely: when `--rpc-user` resolves but no password does, the TUI prompts for the password at startup with masked input (skipped on non-interactive stdin).
+- Outbound network traffic is limited to three things, all to hosts you can name: your own daemon over RPC, `api.github.com` for the release check (`--no-update-check` disables it), and — only if you opt in — peer addresses to `addnodes.gridcoin.club` (see [Peer sharing](#peer-sharing)). Nothing else phones anywhere.
 - This tool talks plain HTTP JSON-RPC. Do not expose your daemon's RPC port over the public internet. Use an SSH tunnel for remote access:
   ```sh
   ssh -L 15715:127.0.0.1:15715 user@node.example.com

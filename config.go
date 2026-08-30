@@ -1,10 +1,10 @@
 // This file owns everything about deciding "how do we talk to the daemon?".
 // It merges four sources of configuration into a single Config struct:
 //
-//   1. Explicit command-line flags (highest priority)
-//   2. Environment variables
-//   3. gridcoinresearch.conf, if present
-//   4. Built-in defaults baked into the binary (lowest priority)
+//  1. Explicit command-line flags (highest priority)
+//  2. Environment variables
+//  3. gridcoinresearch.conf, if present
+//  4. Built-in defaults baked into the binary (lowest priority)
 //
 // The cascade is important: you can always override the conf file with env
 // vars without editing it, and override env vars with a flag for a one-off
@@ -48,6 +48,33 @@ type Config struct {
 	// header "update available" badge). It does NOT disable the manual check
 	// behind the "u" key — that's an explicit, user-initiated action.
 	NoUpdateCheck bool
+	// PeerSharing is the opt-in peer-sharing setting resolved from the
+	// --peer-sharing flag and GRC_PEER_SHARING. Empty means the user did not
+	// specify one on this launch, so the stored answer in state.json wins —
+	// and if that is empty too, they have never been asked.
+	//
+	// A flag or env value always overrides the stored answer and the answer is
+	// never written back: a scripted or containerised run must be able to force
+	// the setting for one launch without silently rewriting what the human
+	// chose. Forcing it on does create the random reporter identifier if there
+	// is not one yet, since reporting is impossible without one, but that is
+	// not an answer to the consent question and does not stand in for one.
+	PeerSharing PeerSharing
+}
+
+// parsePeerSharing reads the flag/env spellings into the tri-state. Anything
+// unrecognised (including empty) is "unspecified" rather than an error: a
+// typo in an env var should not stop the wallet dashboard from starting, it
+// should just leave the stored answer in charge.
+func parsePeerSharing(v string) PeerSharing {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return PeerSharingOn
+	case "0", "false", "no", "off":
+		return PeerSharingOff
+	default:
+		return PeerSharingUnset
+	}
 }
 
 // URL builds the JSON-RPC endpoint. Method receivers with a lowercase name
@@ -90,6 +117,10 @@ func LoadConfig(args []string) (Config, error) {
 		refreshFlag  = flags.Duration("refresh", defaultRefresh, "refresh interval")
 		debugLogFlag = flags.String("debug-log", "", "redirect stderr (Go crash dumps) to this file for debugging")
 		noUpdateFlag = flags.Bool("no-update-check", false, "disable the background check for new releases on GitHub")
+		// Tri-state on purpose: "" means "not specified, use the stored
+		// answer", which is what lets a saved consent survive a normal launch
+		// while still letting a flag override it for a headless run.
+		peerSharingFlag = flags.String("peer-sharing", "", "share the peers you connect to with addnodes.gridcoin.club: on|off (default: ask once, then remember)")
 	)
 
 	if err := flags.Parse(args); err != nil {
@@ -112,6 +143,12 @@ func LoadConfig(args []string) (Config, error) {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GRC_NO_UPDATE_CHECK"))) {
 	case "1", "true", "yes", "on":
 		cfg.NoUpdateCheck = true
+	}
+	// Peer sharing, same shape: flag first, then env. Both accept the usual
+	// truthy/falsy spellings so `GRC_PEER_SHARING=1` does what it looks like.
+	cfg.PeerSharing = parsePeerSharing(*peerSharingFlag)
+	if cfg.PeerSharing == PeerSharingUnset {
+		cfg.PeerSharing = parsePeerSharing(os.Getenv("GRC_PEER_SHARING"))
 	}
 	if cfg.Testnet {
 		cfg.NetworkName = "testnet"

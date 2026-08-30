@@ -351,8 +351,12 @@ type TxStatus struct {
 }
 
 // confirmedThreshold is the depth at which we stop saying "incoming" and
-// start saying "confirmed". 6 matches the bitcoin-ecosystem default.
-const confirmedThreshold = 6
+// start saying "confirmed". Gridcoin's CWalletTx::IsConfirmed() requires 10
+// confirmations, and CWallet::GetBalance() uses that rule for received funds.
+// Keeping the same threshold here also keeps confirmations 1..9 represented
+// in the Unconfirmed total instead of letting them disappear before the
+// daemon moves them into Balance.
+const confirmedThreshold = 10
 
 // IsContractCandidate reports whether a listsinceblock entry looks like a
 // Gridcoin contract transaction — a beacon advertisement, a vote, a poll, a

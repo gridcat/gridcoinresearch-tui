@@ -63,6 +63,17 @@ type peersMsg struct {
 	peers []PeerInfo
 	err   error
 }
+
+// sharingTickMsg fires when it is time to send another peer report.
+type sharingTickMsg time.Time
+
+// sharingDoneMsg carries the result of one report. It deliberately does NOT
+// touch m.inflight: the dashboard spinner is for RPC the user is waiting on,
+// and a background courtesy must never make the footer flash "refreshing".
+type sharingDoneMsg struct {
+	ack reportAck
+	err error
+}
 type txsMsg struct {
 	resp SinceBlockResponse
 	err  error
@@ -566,6 +577,42 @@ func runUpdate(rel releaseInfo) tea.Cmd {
 	}
 }
 
+// sharingTickCmd arms the peer-sharing heartbeat.
+//
+// The beat is a fixed short interval, not the report cadence: whether a report
+// is actually due is decided against m.nextReportAt when the beat lands. That
+// split exists because a tea.Tick in flight cannot be re-timed, so baking the
+// cadence into the timer would make every next_report_after take effect one
+// report late.
+//
+// It is armed unconditionally in Init and re-armed on every beat, exactly like
+// tickCmd, so there is only ever one lineage. Arming it on demand instead
+// (when sharing is switched on) is the tempting version and the wrong one: a
+// lineage from a previous switch-on is still in flight, so each off/on cycle
+// would leave another live timer behind and add another report per interval.
+// A beat with sharing off costs one no-op message.
+func (m *Model) sharingTickCmd() tea.Cmd {
+	return tea.Tick(sharingHeartbeat, func(t time.Time) tea.Msg { return sharingTickMsg(t) })
+}
+
+// sendReportCmd posts one report in the background.
+//
+// It takes the peer slice by value rather than reading m: Bubble Tea runs
+// commands on their own goroutine, and closing over the Model would race the
+// update loop.
+func sendReportCmd(peers []PeerInfo, testnet bool, reporterID string) tea.Cmd {
+	return func() tea.Msg {
+		report, ok := buildReport(peers, testnet, reporterID)
+		if !ok {
+			// Nothing worth sending — no outbound peers yet, or none of them
+			// routable. Not an error, just a quiet no-op.
+			return sharingDoneMsg{}
+		}
+		ack, err := postReport(telemetryURL(), report)
+		return sharingDoneMsg{ack: ack, err: err}
+	}
+}
+
 // updateTickCmd schedules the next background update check.
 func (m *Model) updateTickCmd() tea.Cmd {
 	return tea.Tick(updateCheckInterval, func(t time.Time) tea.Msg { return updateTickMsg(t) })
@@ -584,6 +631,12 @@ func (m Model) Init() tea.Cmd {
 		// periodic re-check.
 		cmds = append(cmds, checkUpdateCmd(false), m.updateTickCmd())
 	}
+	// Peer sharing rides a heartbeat that is always armed; whether the user
+	// opted in, and whether a report is due, is decided on each beat (see
+	// sharingTickCmd for why the timer itself is not gated on consent). No
+	// first-launch burst either: the first report is a full interval out, so
+	// the wallet has time to build a real peer set before anything is sent.
+	cmds = append(cmds, m.sharingTickCmd())
 	return tea.Batch(cmds...)
 }
 
@@ -668,8 +721,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.peersOut = m.peersTotal - m.peersIn
 			m.peersLoaded = true
+			// Held only so a peer-sharing tick has something to report
+			// without issuing an RPC of its own.
+			m.peers = msg.peers
 		}
 		return m, nil
+	case sharingTickMsg:
+		// Re-arm first so nothing below can break the lineage.
+		cmds := []tea.Cmd{m.sharingTickCmd()}
+		if m.sharingOn && m.state.ReporterID != "" {
+			// Book the next slot as we dispatch rather than when the ack
+			// lands, so a report that fails, or that never answers at all,
+			// still retries on the normal cadence. A successful ack overwrites
+			// it with whatever the collector asked for.
+			next, send := scheduleReport(time.Time(msg), m.nextReportAt, m.sharingInterval)
+			m.nextReportAt = next
+			if send {
+				cmds = append(cmds, sendReportCmd(m.peers, m.cfg.Testnet, m.state.ReporterID))
+			}
+		}
+		return m, tea.Batch(cmds...)
+
+	case sharingDoneMsg:
+		if msg.err != nil {
+			// Quiet by design. A collector that is down is not the user's
+			// problem, and the next tick will try again.
+			m.sharingNote = "peer sharing: " + msg.err.Error()
+		} else if msg.ack.Accepted > 0 {
+			m.sharingNote = fmt.Sprintf("shared %d peers", msg.ack.Accepted)
+			// Let the collector pace us rather than hard-coding the cadence,
+			// and apply it to the next report rather than the one after it:
+			// the beat that dispatched this report booked a slot at the old
+			// interval, so overwrite it now that we know better.
+			m.sharingInterval = clampReportInterval(msg.ack.NextReportAfter)
+			m.nextReportAt = time.Now().Add(m.sharingInterval)
+		}
+		return m, nil
+
 	case txsMsg:
 		m.finishFetch()
 		// On error we still flip txsLoaded to true so the panel stops
@@ -994,8 +1082,38 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.retryPollResult()
 		}
 		return m, nil
+	case modeConsent:
+		return m.handleConsentKey(msg)
 	case modeUpdate:
 		return m.handleUpdateKey(msg)
+	}
+
+	// While the inline address search has focus, all printable keys belong to
+	// its text input. Enter keeps the current filter and returns to list
+	// navigation; Esc clears it. Resetting the cursor on every edit makes the
+	// first matching row immediately visible and keeps selections in bounds.
+	if m.addrSearch.Focused() {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "enter":
+			m.addrSearch.Blur()
+			return m, nil
+		case "esc":
+			m.addrSearch.SetValue("")
+			m.addrSearch.Blur()
+			m.addrCursor = 0
+			m.addrHScroll = 0
+			return m, nil
+		}
+		before := m.addrSearch.Value()
+		var cmd tea.Cmd
+		m.addrSearch, cmd = m.addrSearch.Update(msg)
+		if m.addrSearch.Value() != before {
+			m.addrCursor = 0
+			m.addrHScroll = 0
+		}
+		return m, cmd
 	}
 	// Dashboard-mode keys.
 	switch msg.String() {
@@ -1049,6 +1167,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "a":
 		m.anonymous = !m.anonymous
+		return m, nil
+	case "/":
+		// Search is useful regardless of which panel currently has focus, so the
+		// shortcut also moves focus to Addresses. Slash mirrors terminal tools
+		// such as less and Vim, and tmux passes it through without a prefix
+		// conflict. An existing query is retained and made ready for editing.
+		m.focusedArea = focusAddr
+		m.addrCursor = 0
+		m.addrHScroll = 0
+		m.addrSearch.CursorEnd()
+		return m, m.addrSearch.Focus()
+	case "esc":
+		// After Enter has committed a filter, Esc is the quick way back to the
+		// full active tab. With no filter it remains the dashboard's usual no-op.
+		if m.addrSearch.Value() != "" {
+			m.addrSearch.SetValue("")
+			m.addrCursor = 0
+			m.addrHScroll = 0
+		}
 		return m, nil
 	case "tab":
 		// Toggle the arrow-key focus between the tx list and the addresses panel.
@@ -1678,7 +1815,7 @@ func (m Model) handleAddLabelKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) openConfigModal() {
 	m.mode = modeConfig
-	m.conf = newConfigState(m.cfg)
+	m.conf = newConfigState(m.cfg, m.sharingOn)
 	m.conf.focused = cfgFieldNetwork
 }
 
@@ -1721,6 +1858,11 @@ func (m Model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case cfgFieldPeerSharing:
+		if key == " " || key == "enter" || key == "left" || key == "right" {
+			m.conf.peerSharing = !m.conf.peerSharing
+		}
+		return m, nil
 	case cfgFieldApply:
 		if key == "enter" || key == " " {
 			return m.applyConfig()
@@ -1733,6 +1875,49 @@ func (m Model) handleConfigKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		*ti, cmd = ti.Update(msg)
 		return m, cmd
+	}
+	return m, nil
+}
+
+// handleConsentKey drives the one-time peer-sharing question.
+//
+// Only three answers do anything, and there is deliberately no "decide
+// later": leaving the question open would mean asking again next launch,
+// which is how a consent prompt turns into nagging. Esc counts as no — the
+// safe answer, and the one a user who just wants their wallet dashboard is
+// implicitly giving.
+func (m Model) handleConsentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var share bool
+	switch msg.String() {
+	case "y", "Y":
+		share = true
+	case "n", "N", "esc", "q":
+		share = false
+	default:
+		return m, nil
+	}
+
+	next, err := recordConsent(m.state, share)
+	if err != nil {
+		// Could not persist. Honour the answer for this session rather than
+		// trapping the user in the dialog, but do not pretend it stuck.
+		m.sharingNote = "could not save your choice: " + err.Error()
+		m.sharingOn = share
+		m.conf.peerSharing = share
+		m.mode = modeDashboard
+		return m, nil
+	}
+
+	m.state = next
+	m.sharingOn = share
+	m.conf.peerSharing = share
+	m.mode = modeDashboard
+	if share {
+		m.sharingNote = "peer sharing on, thank you"
+		// No timer to start: the heartbeat armed in Init runs whatever the
+		// answer is. Clearing the schedule makes the first report a full
+		// interval from now rather than whenever a stale slot happened to be.
+		m.nextReportAt = time.Time{}
 	}
 	return m, nil
 }
@@ -1783,6 +1968,11 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	m.txsLoaded = false
 	m.addrsLoaded = false
 	m.peersLoaded = false
+	// Drop the cached peers with everything else. They belong to the daemon we
+	// just stopped talking to, and a peer-sharing beat that lands before the
+	// new getpeerinfo answers would otherwise report them under the new
+	// network tag, filing mainnet peers as testnet ones.
+	m.peers = nil
 	m.txs = nil
 	m.txsLastBlock = "" // force a full re-seed against the new daemon
 	m.addresses = nil
@@ -1790,6 +1980,42 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	m.txsErr = ""
 	m.addrsErr = ""
 	m.mode = modeDashboard
+
+	// Peer sharing is the one field in this modal that IS written to disk.
+	// Everything else here is deliberately session-only (see the README), but
+	// a consent decision the program forgets on exit is not a decision, and
+	// re-asking on every launch would be nagging rather than consent.
+	//
+	// A flag or env var wins for the whole launch, so the toggle is inert in
+	// that case; say so instead of silently discarding the change.
+	if m.conf.peerSharing != m.sharingOn {
+		if m.cfg.PeerSharing != PeerSharingUnset {
+			m.sharingNote = "peer sharing is fixed by --peer-sharing for this run"
+		} else {
+			next, err := recordConsent(m.state, m.conf.peerSharing)
+			if err != nil {
+				// Keep the in-memory answer in step with what is on disk: if
+				// we could not save it, we do not pretend it took.
+				m.conf.peerSharing = m.sharingOn
+				m.sharingNote = "could not save peer sharing: " + err.Error()
+			} else {
+				m.state = next
+				m.sharingOn = m.conf.peerSharing
+				// Forget any booked slot either way. Switching on should wait
+				// a full interval, not fire against a slot left over from the
+				// last time it was on; switching off should leave nothing
+				// behind to fire against. The heartbeat itself keeps running
+				// regardless, so there is no timer to start or stop here.
+				m.nextReportAt = time.Time{}
+				if m.sharingOn {
+					m.sharingNote = "peer sharing on"
+				} else {
+					m.sharingNote = "peer sharing off"
+				}
+			}
+		}
+	}
+
 	// Don't start a new tickCmd here: the lineage seeded in Init re-arms itself
 	// on every tickMsg and never stops, so it already keeps polling at the new
 	// cfg.Refresh. Starting another would leak a second self-re-arming tick (and
