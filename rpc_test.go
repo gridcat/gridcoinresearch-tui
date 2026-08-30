@@ -115,6 +115,9 @@ func TestClassifyTransaction(t *testing.T) {
 		{"pending send", Transaction{Category: "send", Confirmations: 0}, TxStatusUpcoming},
 		{"shallow receive", Transaction{Category: "receive", Confirmations: 2}, TxStatusIncoming},
 		{"shallow send", Transaction{Category: "send", Confirmations: 2}, TxStatusSending},
+		{"six-confirmation receive", Transaction{Category: "receive", Confirmations: 6}, TxStatusIncoming},
+		{"nine-confirmation receive", Transaction{Category: "receive", Confirmations: 9}, TxStatusIncoming},
+		{"ten-confirmation receive", Transaction{Category: "receive", Confirmations: 10}, TxStatusConfirmed},
 		{"deep receive", Transaction{Category: "receive", Confirmations: 100}, TxStatusConfirmed},
 		{"deep send", Transaction{Category: "send", Confirmations: 100}, TxStatusConfirmed},
 		{"stake", Transaction{Category: "generate", Confirmations: 50}, TxStatusStake},
@@ -126,6 +129,32 @@ func TestClassifyTransaction(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.kind)
 			}
 		})
+	}
+}
+
+// TestUnconfirmedReceivedConfirmationBoundary prevents received funds from
+// disappearing between the TUI's Unconfirmed and Balance totals. Gridcoin's
+// wallet keeps an external receive out of GetBalance() until confirmation 10,
+// so the TUI must continue deriving it as unconfirmed through confirmation 9.
+func TestUnconfirmedReceivedConfirmationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		confirmations int64
+		want          float64
+	}{
+		{confirmations: 0, want: 11500},
+		{confirmations: 6, want: 11500},
+		{confirmations: 9, want: 11500},
+		{confirmations: 10, want: 0},
+	} {
+		m := Model{txs: []Transaction{{
+			Category:      "receive",
+			Amount:        11500,
+			Confirmations: tc.confirmations,
+		}}}
+		if got := m.unconfirmedReceived(); got != tc.want {
+			t.Errorf("confirmations %d: unconfirmedReceived() = %.2f, want %.2f",
+				tc.confirmations, got, tc.want)
+		}
 	}
 }
 
