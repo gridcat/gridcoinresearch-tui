@@ -1087,6 +1087,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeUpdate:
 		return m.handleUpdateKey(msg)
 	}
+
+	// While the inline address search has focus, all printable keys belong to
+	// its text input. Enter keeps the current filter and returns to list
+	// navigation; Esc clears it. Resetting the cursor on every edit makes the
+	// first matching row immediately visible and keeps selections in bounds.
+	if m.addrSearch.Focused() {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "enter":
+			m.addrSearch.Blur()
+			return m, nil
+		case "esc":
+			m.addrSearch.SetValue("")
+			m.addrSearch.Blur()
+			m.addrCursor = 0
+			m.addrHScroll = 0
+			return m, nil
+		}
+		before := m.addrSearch.Value()
+		var cmd tea.Cmd
+		m.addrSearch, cmd = m.addrSearch.Update(msg)
+		if m.addrSearch.Value() != before {
+			m.addrCursor = 0
+			m.addrHScroll = 0
+		}
+		return m, cmd
+	}
 	// Dashboard-mode keys.
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -1139,6 +1167,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "a":
 		m.anonymous = !m.anonymous
+		return m, nil
+	case "/":
+		// Search is useful regardless of which panel currently has focus, so the
+		// shortcut also moves focus to Addresses. Slash mirrors terminal tools
+		// such as less and Vim, and tmux passes it through without a prefix
+		// conflict. An existing query is retained and made ready for editing.
+		m.focusedArea = focusAddr
+		m.addrCursor = 0
+		m.addrHScroll = 0
+		m.addrSearch.CursorEnd()
+		return m, m.addrSearch.Focus()
+	case "esc":
+		// After Enter has committed a filter, Esc is the quick way back to the
+		// full active tab. With no filter it remains the dashboard's usual no-op.
+		if m.addrSearch.Value() != "" {
+			m.addrSearch.SetValue("")
+			m.addrCursor = 0
+			m.addrHScroll = 0
+		}
 		return m, nil
 	case "tab":
 		// Toggle the arrow-key focus between the tx list and the addresses panel.

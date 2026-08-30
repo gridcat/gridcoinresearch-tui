@@ -12,6 +12,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	// textinput is a small reusable component from the Bubble Tea ecosystem
@@ -388,6 +389,11 @@ type Model struct {
 	// switched with the 1/2/3 keys. See visibleAddresses.
 	addrTab addrTab
 
+	// addrSearch is the inline label/address filter for the address panel. A
+	// non-empty value keeps filtering after the input loses focus; Focused
+	// distinguishes actively typing from navigating the filtered rows.
+	addrSearch textinput.Model
+
 	// anonymous hides monetary amounts on screen. Toggled at runtime via
 	// the "a" hotkey so the user can safely show the dashboard in public.
 	anonymous bool
@@ -474,6 +480,11 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 	addLabel.CharLimit = 128
 	addLabel.Width = 50
 
+	addrSearch := textinput.New()
+	addrSearch.Placeholder = "label or address"
+	addrSearch.CharLimit = 128
+	addrSearch.Width = 36
+
 	// Resolve peer sharing once, here, so the rest of the program reads a
 	// single boolean instead of re-deriving the precedence rule. A flag or
 	// env value wins for this launch; otherwise the stored answer decides;
@@ -528,6 +539,7 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		conf:              newConfigState(cfg, sharing == PeerSharingOn),
 		edit:              editLabelState{label: labelInput},
 		add:               addLabelState{address: addAddress, label: addLabel},
+		addrSearch:        addrSearch,
 	}
 }
 
@@ -606,17 +618,28 @@ func (m Model) uncachedContractTxIDs() []string {
 // appear immediately and only drop out if validateaddress later flags them
 // foreign. Others keeps exactly the foreign ones. All returns the full slice
 // untouched. The cursor, scroll, sign, and edit paths all read this, so the
-// filter lives in one place.
+// filter lives in one place. A search query further narrows the active tab by
+// label or address as the user types. Labels match case-insensitively; address
+// matching preserves case because Gridcoin addresses themselves are
+// case-sensitive.
 func (m Model) visibleAddresses() []ReceivedAddress {
-	if m.addrTab == addrTabAll {
+	query := strings.TrimSpace(m.addrSearch.Value())
+	if m.addrTab == addrTabAll && query == "" {
 		return m.addresses
 	}
+	labelQuery := strings.ToLower(query)
 	wantForeign := m.addrTab == addrTabOthers // else addrTabMine: keep non-foreign
 	var out []ReceivedAddress
 	for _, a := range m.addresses {
-		if (m.ownership(a.Address) == ownForeign) == wantForeign {
-			out = append(out, a)
+		if m.addrTab != addrTabAll && (m.ownership(a.Address) == ownForeign) != wantForeign {
+			continue
 		}
+		if query != "" &&
+			!strings.Contains(strings.ToLower(a.DisplayLabel()), labelQuery) &&
+			!strings.Contains(a.Address, query) {
+			continue
+		}
+		out = append(out, a)
 	}
 	return out
 }

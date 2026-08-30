@@ -681,18 +681,20 @@ func (m Model) renderAddrTabs() string {
 		}
 		return styleMuted.Render(" " + text + " ")
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top,
+	tabs := lipgloss.JoinHorizontal(lipgloss.Top,
 		seg(addrTabMine, "1", "Mine", mine), " ",
 		seg(addrTabOthers, "2", "Others", others), " ",
 		seg(addrTabAll, "3", "All", all),
 	)
+	return tabs + styleMuted.Render("  [/] search")
 }
 
 // renderAddresses draws the scrollable My Addresses panel. Like
 // renderTxList, it derives the visible window from the cursor each
 // frame. The panel renders a focus indicator (accent border + ▸ on the
 // selected row) only when m.focusedArea == focusAddr. Rows are drawn from the
-// active tab's slice (see visibleAddresses), with the tab bar as the header.
+// active tab's slice (see visibleAddresses), with the tab bar as the header
+// and an inline search row while a query is being edited or applied.
 func (m Model) renderAddresses(maxHeight int) string {
 	border := styleBorder
 	if m.focusedArea == focusAddr {
@@ -722,12 +724,55 @@ func (m Model) renderAddresses(maxHeight int) string {
 	// The tab bar is always rendered, even when the active tab is empty, so the
 	// user can switch away from a tab that filtered everything out.
 	visible := m.visibleAddresses()
+	query := strings.TrimSpace(m.addrSearch.Value())
+	showSearch := m.addrSearch.Focused() || query != ""
+	searchRow := ""
+	if showSearch {
+		// Keep the input within the panel even on narrow terminals. At roomy
+		// widths the row also carries the relevant keys; the help screen remains
+		// the fallback when there is only space for the match count.
+		matchWord := "matches"
+		if len(visible) == 1 {
+			matchWord = "match"
+		}
+		suffix := fmt.Sprintf("  %d %s", len(visible), matchWord)
+		if m.width >= 76 {
+			if m.addrSearch.Focused() {
+				suffix += " · enter keep · esc clear"
+			} else {
+				suffix += " · / edit · esc clear"
+			}
+		}
+		searchInput := m.addrSearch
+		searchInput.Width = m.panelRowWidth() - runewidth.StringWidth("Search: ") - runewidth.StringWidth(suffix)
+		if searchInput.Width > 36 {
+			searchInput.Width = 36
+		}
+		if searchInput.Width < 4 {
+			searchInput.Width = 4
+		}
+		searchRow = styleAccent.Render("Search: ") + searchInput.View() + styleMuted.Render(suffix)
+	}
 	if len(visible) == 0 {
-		return box.Render(m.renderAddrTabs() + "\n" + styleMuted.Render("no addresses in this tab"))
+		empty := "no addresses in this tab"
+		if query != "" {
+			empty = "no labels or addresses match"
+		}
+		lines := []string{m.renderAddrTabs()}
+		if showSearch {
+			lines = append(lines, searchRow)
+		}
+		lines = append(lines, styleMuted.Render(empty))
+		return box.Render(strings.Join(lines, "\n"))
 	}
 
-	// Available data rows inside the box: maxHeight - 2 (borders) - 1 (tab bar).
-	maxRows := maxHeight - 3
+	// Available data rows inside the box: borders + tab bar, plus the optional
+	// search row. The filter therefore never makes the panel exceed its budget.
+	headerRows := 1
+	if showSearch {
+		headerRows++
+	}
+	maxRows := maxHeight - 2 - headerRows
 	if maxRows < 1 {
 		maxRows = 1
 	}
@@ -759,6 +804,9 @@ func (m Model) renderAddresses(maxHeight int) string {
 		header += styleMuted.Render("  ←/→")
 	}
 	lines := []string{header}
+	if showSearch {
+		lines = append(lines, searchRow)
+	}
 
 	end := offset + maxRows
 	if end > len(visible) {
@@ -1433,7 +1481,7 @@ func (m Model) renderFooter() string {
 	// contextually rather than implying it works everywhere. (The 1/2/3 tab
 	// keys are self-documented in the panel's own tab bar.)
 	if m.focusedArea == focusAddr {
-		keys = append(keys, "[e]dit label")
+		keys = append(keys, "[/] search addresses", "[e]dit label")
 	}
 	keys = append(keys,
 		"[p]olls",
@@ -2010,6 +2058,7 @@ func (m Model) renderHelpModal() string {
 		"",
 		styleTitle.Render("My Addresses"),
 		keyRow("1 2 3", "Show Mine, Others, or All addresses"),
+		keyRow("/", "Search labels or addresses; Enter keeps, Esc clears"),
 		keyRow("+ −", "Grow or shrink the panel; 0 resets it"),
 		keyRow("e", "Rename the selected address (blank clears it)"),
 		keyRow("n", "Add a labeled address-book entry"),

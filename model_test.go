@@ -1,7 +1,11 @@
 // Tests for the My Addresses tab filter. See rpc_test.go for a testing primer.
 package main
 
-import "testing"
+import (
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 // addr is a tiny helper to keep the fixture readable.
 func addr(a string) ReceivedAddress { return ReceivedAddress{Address: a} }
@@ -67,6 +71,60 @@ func TestAddrTabCounts(t *testing.T) {
 	mine, others, all := m.addrTabCounts()
 	if mine != 3 || others != 1 || all != 4 {
 		t.Errorf("counts = (mine %d, others %d, all %d), want (3, 1, 4)", mine, others, all)
+	}
+}
+
+func TestVisibleAddressesSearchesLabelsAndAddresses(t *testing.T) {
+	m := NewModel(Config{}, nil)
+	m.addrTab = addrTabAll
+	m.addresses = []ReceivedAddress{
+		{Address: "one", Account: "Monthly Savings"},
+		{Address: "two", Label: "Coffee money"},
+		{Address: "savings-address", Account: "Unrelated"},
+		{Address: "three"},
+	}
+	m.addrSearch.SetValue("  SAVings ")
+
+	got := m.visibleAddresses()
+	if len(got) != 1 || got[0].Address != "one" {
+		t.Fatalf("filtered addresses = %+v, want only the matching label", got)
+	}
+
+	m.addrSearch.SetValue("savings-address")
+	got = m.visibleAddresses()
+	if len(got) != 1 || got[0].Address != "savings-address" {
+		t.Fatalf("address search = %+v, want only the matching address", got)
+	}
+}
+
+func TestAddressSearchKeyboardFlow(t *testing.T) {
+	m := NewModel(Config{}, nil)
+	m.mode = modeDashboard
+	m.focusedArea = focusTx
+	m.addresses = []ReceivedAddress{{Account: "Alpha"}, {Account: "Beta"}}
+
+	next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = next.(Model)
+	if !m.addrSearch.Focused() || m.focusedArea != focusAddr {
+		t.Fatalf("slash should focus address search, focused=%v area=%v", m.addrSearch.Focused(), m.focusedArea)
+	}
+
+	next, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("beta")})
+	m = next.(Model)
+	if got := m.visibleAddresses(); len(got) != 1 || got[0].DisplayLabel() != "Beta" {
+		t.Fatalf("live filter = %+v, want Beta", got)
+	}
+
+	next, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.addrSearch.Focused() || m.addrSearch.Value() != "beta" {
+		t.Fatalf("enter should retain a blurred filter, focused=%v value=%q", m.addrSearch.Focused(), m.addrSearch.Value())
+	}
+
+	next, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.addrSearch.Value() != "" || len(m.visibleAddresses()) != 2 {
+		t.Fatalf("esc should clear filter, value=%q visible=%d", m.addrSearch.Value(), len(m.visibleAddresses()))
 	}
 }
 
