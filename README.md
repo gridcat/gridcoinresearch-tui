@@ -95,6 +95,8 @@ every style picks it up automatically.
 | `--conf PATH` | — | `~/.GridcoinResearch[/testnet]/gridcoinresearch.conf` | Best-effort; missing file is fine. |
 | `--refresh DUR` | — | `10s` | How often to poll the daemon. |
 | `--debug-log PATH` | — | empty | Redirect stderr to a file so crash dumps land there instead of wrecking the terminal. See [Troubleshooting](#troubleshooting). |
+| `--no-update-check` | `GRC_NO_UPDATE_CHECK` | off | Disable the background release check. The manual `u` key still works. |
+| `--peer-sharing on\|off` | `GRC_PEER_SHARING` | ask once | Opt in or out of [peer sharing](#peer-sharing) without being asked. Overrides the saved answer for that run and is not written back, which is what makes it safe in a script or container. |
 
 Flags accept both single- and double-dash forms (`-testnet` and `--testnet` are equivalent), to match Go's standard flag parser. `--help` prints the single-dash form by convention.
 
@@ -144,10 +146,31 @@ The wallet is only unlocked when it has to be, an unencrypted wallet, or one you
 
 Edits in the config panel are **session-only**, they apply immediately (the RPC client is rebuilt against the new endpoint and a fresh fetch runs) but are not written to disk. Next launch re-resolves from flags/env/conf as usual. Toggling the network auto-updates the port field if it still held the old network's default, so you don't need to remember port numbers.
 
+The one exception is the **Peer sharing** row, which is written to disk. A consent decision the program forgets on exit is not a decision, and re-asking every launch would be nagging rather than consent.
+
+## Peer sharing
+
+**Off unless you turn it on.** You are asked once, on first run, and your answer is remembered.
+
+gridcoin.club publishes a list of reachable Gridcoin peers that new wallets use to find the network. If you opt in, the TUI periodically sends the addresses of the peers your node dialled **out** to. That gives the list a second vantage point: a node that answers from the list's own server may still be firewalled from where you are, and only a real wallet somewhere else can tell the difference.
+
+A report contains:
+
+- the IP and port of peers this node connected out to
+- a random identifier your wallet generated locally, so repeat reports can be counted without identifying you
+- this wallet's version
+
+It does **not** contain your addresses, balances or transactions, your CPID or anything about your BOINC work, your own IP address, or your peers' version strings. Only outbound peers are shared: an inbound peer's address carries an ephemeral source port that nothing can connect back to, so sharing it would just add dead entries to a public list. Private, loopback, CGNAT and documentation addresses are filtered out before anything is sent.
+
+Reports go to `addnodes.gridcoin.club` about once an hour, and only while the TUI is open. Nothing is sent in the background when the program is not running.
+
+To change your mind, press `c` and toggle **Peer sharing**, or start with `--peer-sharing=off`. The saved answer lives in `state.json` under your OS config directory (`~/.config/gridcoinresearch-tui/` on Linux); deleting that file resets both the answer and the random identifier.
+
 ## Security notes
 
 - The TUI never stores your wallet passphrase. It is held in memory only for the duration of a single `sendtoaddress` call, then the wallet is immediately re-locked via `walletlock`.
 - Pass `--rpc-password` via env var, not the command line, flags are visible in `ps`. Or omit it entirely: when `--rpc-user` resolves but no password does, the TUI prompts for the password at startup with masked input (skipped on non-interactive stdin).
+- Outbound network traffic is limited to three things, all to hosts you can name: your own daemon over RPC, `api.github.com` for the release check (`--no-update-check` disables it), and — only if you opt in — peer addresses to `addnodes.gridcoin.club` (see [Peer sharing](#peer-sharing)). Nothing else phones anywhere.
 - This tool talks plain HTTP JSON-RPC. Do not expose your daemon's RPC port over the public internet. Use an SSH tunnel for remote access:
   ```sh
   ssh -L 15715:127.0.0.1:15715 user@node.example.com

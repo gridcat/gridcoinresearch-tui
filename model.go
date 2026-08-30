@@ -36,6 +36,7 @@ const (
 	modePolls                      // the full-screen governance polls list
 	modePollDetail                 // a modal showing one poll in full (opened from modePolls)
 	modeUpdate                     // the self-update modal (check → confirm → install)
+	modeConsent                    // the one-time peer-sharing consent screen
 )
 
 // focusArea identifies which scrollable list on the dashboard is "active"
@@ -70,6 +71,7 @@ const (
 	cfgFieldPort
 	cfgFieldUser
 	cfgFieldRefresh
+	cfgFieldPeerSharing
 	cfgFieldApply
 	cfgFieldCount // sentinel: not a real field, used for modulo in tab navigation
 )
@@ -88,7 +90,11 @@ type configState struct {
 	port    textinput.Model
 	user    textinput.Model
 	refresh textinput.Model
-	errMsg  string
+	// peerSharing is a boolean row toggled with space/←→, like the network
+	// row. Unlike every other field in this modal it IS written to disk when
+	// applied — see applyConfig. Consent that forgets itself is not consent.
+	peerSharing bool
+	errMsg      string
 }
 
 // sendStep is the state-machine step inside the send modal. The wizard
@@ -281,6 +287,31 @@ type Model struct {
 	peersIn     int
 	peersOut    int
 	peersLoaded bool
+	// peers holds the last getpeerinfo result, kept only so a peer-sharing
+	// tick has something to report without issuing its own RPC. It is
+	// discarded like any other cached fetch; nothing reads it unless sharing
+	// is on.
+	peers []PeerInfo
+
+	// ---- peer sharing -------------------------------------------------
+	// state is the on-disk answer (see state.go). cfg.PeerSharing overrides
+	// it for this launch when a flag or env var was given.
+	state State
+	// sharingOn is the resolved answer actually in force right now.
+	sharingOn bool
+	// sharingInterval is how long until the next report; the collector can
+	// widen or narrow it per response.
+	sharingInterval time.Duration
+	// sharingNote is a short one-line result shown in the footer, e.g. after
+	// a failed post. Never a modal: sharing is a background courtesy and must
+	// not interrupt anyone.
+	sharingNote string
+	// nextReportAt is when the next report falls due. The schedule lives here
+	// as data rather than in the timer because a tea.Tick already in flight
+	// cannot be re-timed or cancelled: holding it here is what lets the
+	// collector's next_report_after apply to the very next report instead of
+	// the one after it. Zero means nothing is scheduled.
+	nextReportAt time.Time
 	// addrMine caches authoritative per-address ownership (validateaddress
 	// ismine). listreceivedbyaddress returns the entire address book —
 	// foreign addresses you've merely labelled included — so the My
@@ -443,9 +474,39 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 	addLabel.CharLimit = 128
 	addLabel.Width = 50
 
+	// Resolve peer sharing once, here, so the rest of the program reads a
+	// single boolean instead of re-deriving the precedence rule. A flag or
+	// env value wins for this launch; otherwise the stored answer decides;
+	// and if neither says anything the user has never been asked, which Init
+	// turns into the consent screen.
+	st := loadState()
+	sharing := st.PeerSharing
+	if cfg.PeerSharing != PeerSharingUnset {
+		sharing = cfg.PeerSharing
+	}
+	// A flag or env opt-in stores no consent answer and therefore has no
+	// stored identifier on a fresh install, which would leave sharing switched
+	// on but every report silently dropped. Mint one now so the setting means
+	// what it says.
+	if sharing == PeerSharingOn {
+		st = ensureReporterID(st)
+	}
+
+	// Never asked, and nothing on the command line answered for them. Open on
+	// the consent screen so the very first thing the user sees is the choice,
+	// rather than discovering the feature later in a settings panel.
+	startMode := modeDashboard
+	if st.PeerSharing == PeerSharingUnset && cfg.PeerSharing == PeerSharingUnset {
+		startMode = modeConsent
+	}
+
 	return Model{
-		cfg: cfg,
-		rpc: rpc,
+		cfg:             cfg,
+		rpc:             rpc,
+		mode:            startMode,
+		state:           st,
+		sharingOn:       sharing == PeerSharingOn,
+		sharingInterval: telemetryInterval,
 		// Init will fire 6 fetches (wallet, chain, staking, peers, txs,
 		// addrs) right after Bubble Tea calls Init on us. Pre-seeding
 		// inflight here means the spinner's first tick sees a positive
@@ -464,7 +525,7 @@ func NewModel(cfg Config, rpc *RPCClient) Model {
 		pollResultErr:     make(map[string]string),
 		send:              sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
 		sign:              signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
-		conf:              newConfigState(cfg),
+		conf:              newConfigState(cfg, sharing == PeerSharingOn),
 		edit:              editLabelState{label: labelInput},
 		add:               addLabelState{address: addAddress, label: addLabel},
 	}
@@ -613,7 +674,7 @@ func (m Model) addrTabCounts() (mine, others, all int) {
 // newConfigState builds a fresh configState pre-populated with the values
 // currently in the live Config. Used both for the initial Model and for
 // resetting the form each time the config modal is opened.
-func newConfigState(cfg Config) configState {
+func newConfigState(cfg Config, sharingOn bool) configState {
 	mk := func(value string, width int) textinput.Model {
 		ti := textinput.New()
 		ti.SetValue(value)
@@ -622,10 +683,11 @@ func newConfigState(cfg Config) configState {
 		return ti
 	}
 	return configState{
-		testnet: cfg.Testnet,
-		host:    mk(cfg.Host, 30),
-		port:    mk(cfg.Port, 10),
-		user:    mk(cfg.User, 30),
-		refresh: mk(cfg.Refresh.String(), 10),
+		testnet:     cfg.Testnet,
+		host:        mk(cfg.Host, 30),
+		port:        mk(cfg.Port, 10),
+		user:        mk(cfg.User, 30),
+		refresh:     mk(cfg.Refresh.String(), 10),
+		peerSharing: sharingOn,
 	}
 }

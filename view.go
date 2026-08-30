@@ -307,6 +307,8 @@ func (m Model) View() string {
 		return m.renderPollsScreen()
 	case modePollDetail:
 		return m.renderPollDetailModal()
+	case modeConsent:
+		return m.renderConsentModal()
 	case modeUpdate:
 		return m.renderUpdateModal()
 	}
@@ -1387,8 +1389,15 @@ func (m Model) renderPollDetailModal() string {
 func (m Model) renderStatusBar(keys []string) string {
 	left := styleMuted.Render(strings.Join(keys, "  "))
 	right := ""
+	// Peer sharing reports its result here and nowhere else. It is a
+	// background courtesy to the network, so a failure is worth showing but
+	// never worth a modal or an error colour that implies the wallet is
+	// broken.
+	if m.sharingNote != "" {
+		right = styleMuted.Render(sanitizeTerminal(m.sharingNote)) + "  "
+	}
 	if m.inflight > 0 {
-		right = styleAccent.Render(spinnerFrames[m.spinnerFrame])
+		right += styleAccent.Render(spinnerFrames[m.spinnerFrame])
 	}
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4
 	if gap < 1 {
@@ -1929,6 +1938,53 @@ func (m Model) renderUpdateModal() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
+// renderConsentModal asks, once, whether to share peer addresses.
+//
+// The screen is written to be readable by someone who did not go looking for
+// this feature, because it opens unprompted on first launch. That means being
+// concrete about three things: what leaves the machine, what does not, and
+// how to change your mind. The "what does not" list is the important half —
+// this is a wallet, and the honest answer to "is it sending my balance
+// anywhere" needs to be visible rather than implied.
+//
+// Keep this wording and the payload in telemetry.go in step. If the report
+// ever carries more than peer addresses, consentVersion in state.go must be
+// bumped so people who agreed to this wording are asked again.
+func (m Model) renderConsentModal() string {
+	label := styleLabel.Render
+
+	body := label("gridcoin.club publishes a list of reachable Gridcoin peers that") + "\n" +
+		label("new wallets use to find the network. You can help keep it honest.") + "\n\n"
+
+	body += styleTitle.Render("What would be sent") + "\n" +
+		label("• the IP and port of peers this node connected OUT to") + "\n" +
+		label("• a random ID your wallet makes up locally, so repeat reports") + "\n" +
+		label("  can be counted without identifying you") + "\n" +
+		label("• this wallet's version") + "\n\n"
+
+	body += styleTitle.Render("What is never sent") + "\n" +
+		styleGood.Render("• your addresses, balances or transactions") + "\n" +
+		styleGood.Render("• your CPID, or anything about your BOINC work") + "\n" +
+		styleGood.Render("• your own IP address, or your peers' version strings") + "\n\n"
+
+	body += label("Sent about once an hour, only while this program is open.") + "\n" +
+		label("Change it any time with [c] → Peer sharing, or --peer-sharing=off.") + "\n\n"
+
+	body += styleMuted.Render("[y] Share my peers    [n] No thanks")
+
+	modalWidth := 70
+	if max := m.width - 4; modalWidth > max && max > 0 {
+		modalWidth = max
+	}
+	modal := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(modalWidth).
+		Render(styleTitle.Render("Help the peer list?") + "\n\n" + body)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
 func (m Model) renderHelpModal() string {
 	// keyRow renders one "keys → what they do" line: the keys in the accent
 	// colour in a fixed-width column so the descriptions line up.
@@ -1963,7 +2019,8 @@ func (m Model) renderHelpModal() string {
 		keyRow("s", "Send GRC (choose a saved label or type an address)"),
 		keyRow("m", "Sign a message with one of your addresses"),
 		keyRow("p", "Browse on-chain governance polls (tab: all / active)"),
-		keyRow("c", "Change host, port, login, or refresh for this session"),
+		keyRow("c", "Change host, port, login or refresh for this session,"),
+		keyRow("", "and turn peer sharing on or off (that one is remembered)"),
 		keyRow("u", "Check GitHub for a newer release and update in place"),
 		keyRow("a", "Hide every amount on screen, handy when sharing"),
 		keyRow("r", "Refresh now instead of waiting for the next poll"),
@@ -2009,6 +2066,28 @@ func (m Model) renderConfigModal() string {
 	userLine := row("User", cfgFieldUser, m.conf.user.View())
 	refreshLine := row("Refresh", cfgFieldRefresh, m.conf.refresh.View())
 
+	// Peer sharing: the only row here that outlives the session. Show what it
+	// does rather than just on/off, because "Peer sharing" alone tells a user
+	// nothing about what leaves their machine.
+	sharingValue := styleMuted.Render("○ off")
+	if m.conf.peerSharing {
+		sharingValue = styleGood.Render("● on")
+	}
+	if m.cfg.PeerSharing != PeerSharingUnset {
+		// Fixed by --peer-sharing / GRC_PEER_SHARING for this launch, so the
+		// toggle cannot take effect. Better to say so than to let it flip and
+		// quietly do nothing.
+		sharingValue += "  " + styleWarn.Render("(fixed by flag/env)")
+	} else {
+		sharingValue += "  " + styleMuted.Render("(space/←→ to toggle)")
+	}
+	sharingLine := row("Peer sharing", cfgFieldPeerSharing, sharingValue)
+	sharingHelp := lipgloss.JoinHorizontal(lipgloss.Top,
+		"  ",
+		configLabelStyle.Render(""),
+		styleMuted.Render("share the peers you connect to, to help the public node list"),
+	)
+
 	// Password is read-only, we only show whether it was resolved from
 	// flag/env/conf at startup. This keeps the passphrase off screen and
 	// saves the user from re-typing it to tweak unrelated fields.
@@ -2051,6 +2130,8 @@ func (m Model) renderConfigModal() string {
 		userLine,
 		passLine,
 		refreshLine,
+		sharingLine,
+		sharingHelp,
 		"",
 		applyLine,
 		"",
