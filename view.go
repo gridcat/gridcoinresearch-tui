@@ -710,15 +710,21 @@ func (m Model) renderAddresses(maxHeight int) string {
 		box = box.Height(maxHeight - 2)
 	}
 
-	title := "My Addresses"
+	titleStyle := styleTitle
+	if m.focusedArea == focusAddr {
+		titleStyle = styleAccent
+	}
+	titled := func(content string) string {
+		return titledBox(box, titleStyle, "My Addresses", content)
+	}
 	if !m.addrsLoaded {
-		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("loading…"))
+		return titled(styleMuted.Render("loading…"))
 	}
 	if m.addrsErr != "" {
-		return box.Render(styleTitle.Render(title) + "\n" + styleBad.Render("error: "+sanitizeTerminal(m.addrsErr)))
+		return titled(styleBad.Render("error: " + sanitizeTerminal(m.addrsErr)))
 	}
 	if len(m.addresses) == 0 {
-		return box.Render(styleTitle.Render(title) + "\n" + styleMuted.Render("wallet has no addresses yet, run `getnewaddress`"))
+		return titled(styleMuted.Render("wallet has no addresses yet, run `getnewaddress`"))
 	}
 
 	// The tab bar is always rendered, even when the active tab is empty, so the
@@ -763,7 +769,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 			lines = append(lines, searchRow)
 		}
 		lines = append(lines, styleMuted.Render(empty))
-		return box.Render(strings.Join(lines, "\n"))
+		return titled(strings.Join(lines, "\n"))
 	}
 
 	// Available data rows inside the box: borders + tab bar, plus the optional
@@ -823,7 +829,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 		}
 		lines = append(lines, prefix+row)
 	}
-	return box.Render(strings.Join(lines, "\n"))
+	return titled(strings.Join(lines, "\n"))
 }
 
 // styledSeg is one coloured run of an address row. We keep rows as a list of
@@ -1002,6 +1008,66 @@ func truncate(text string, maxCols int) string {
 	return runewidth.Truncate(text, maxCols, "…")
 }
 
+// titledBox renders content inside a bordered box whose top edge carries the
+// title, the way btop draws its panels:
+//
+//	╭─ Transactions ───────────────╮
+//	│ ▸ 12:03  +1.25   confirmed   │
+//	╰──────────────────────────────╯
+//
+// style is a bordered style with Width (and optionally Height) already
+// applied; the helper draws the top edge itself and lets Lipgloss draw the
+// other three sides, so padding, width and height keep their usual meaning and
+// the outer size is the same as a plain box. titleStyle colours the label,
+// which lets callers follow focus (styleTitle when idle, styleAccent when the
+// panel has focus). A title too wide for the edge is truncated; one that can't
+// fit at all leaves a plain edge behind.
+func titledBox(style lipgloss.Style, titleStyle lipgloss.Style, title, content string) string {
+	b := style.GetBorderStyle()
+	edge := lipgloss.NewStyle().Foreground(style.GetBorderTopForeground())
+	body := style.BorderTop(false).Render(content)
+	// Measure the body rather than trusting Width(): content wider than the
+	// style's width pushes the box out, and the top edge has to follow it or
+	// the box loses its right corner.
+	w := lipgloss.Width(body)
+	if w < 2 {
+		w = 2
+	}
+
+	// "╭─ " + label + " ─╮" spends 6 columns on chrome before a title fits.
+	// truncate measures with go-runewidth and the edge is laid out with
+	// lipgloss.Width; the two disagree on a few graphemes (an emoji carrying a
+	// variation selector counts 1 and 2), so the fill is re-checked against the
+	// label lipgloss will actually draw. A label that still doesn't fit gives
+	// up its space rather than pushing the closing corner off the end.
+	label := truncate(title, w-6)
+	fill := 0
+	if label != "" {
+		label = " " + label + " "
+		fill = w - 3 - lipgloss.Width(label)
+	}
+	if fill < 1 {
+		return edge.Render(b.TopLeft+strings.Repeat(b.Top, w-2)+b.TopRight) + "\n" + body
+	}
+	top := edge.Render(b.TopLeft+b.Top) +
+		titleStyle.Render(label) +
+		edge.Render(strings.Repeat(b.Top, fill)+b.TopRight)
+	return top + "\n" + body
+}
+
+// modalBox renders a dialog the way titledBox renders a panel: a
+// double-bordered box of the given width carrying its title in the top edge.
+// Callers pass the body alone — the title is no longer its first content row,
+// and the box's top padding supplies the blank line that used to follow it.
+func modalBox(width int, title, body string) string {
+	style := lipgloss.NewStyle().
+		Border(lipgloss.DoubleBorder()).
+		BorderForeground(colorAccent).
+		Padding(1, 2).
+		Width(width)
+	return titledBox(style, styleTitle, title, body)
+}
+
 // renderBar draws a fixed-width proportional bar (filled █ + empty ░) for a
 // fraction in [0,1] — used by the poll detail popup's per-choice results
 // breakdown. Out-of-range fractions are clamped.
@@ -1021,11 +1087,12 @@ func renderBar(fraction float64, width int) string {
 
 // listWindow computes the visible-row budget and scroll offset for a bordered
 // scroll panel that is `height` rows tall and holds `total` rows. The chrome is
-// 3 rows (2 border + 1 title), and the offset slides forward only — starting at
-// 0 and advancing just enough to keep the cursor on the last visible row.
-// Shared by renderTxList and renderPollsList so their scroll math can't drift.
+// the 2 border rows — the title lives in the top border edge (see titledBox),
+// not in the content — and the offset slides forward only, starting at 0 and
+// advancing just enough to keep the cursor on the last visible row. Shared by
+// renderTxList and renderPollsList so their scroll math can't drift.
 func listWindow(height, cursor, total int) (maxRows, offset int) {
-	maxRows = height - 3
+	maxRows = height - 2
 	if maxRows < 1 {
 		maxRows = 1
 	}
@@ -1091,20 +1158,26 @@ func (m Model) renderTxList(height int) string {
 		border = styleBorderFocused
 	}
 	boxStyle := border.Width(m.width - 2).Height(height - 2)
-	title := styleTitle.Render("Transactions")
+	titleStyle := styleTitle
+	if m.focusedArea == focusTx {
+		titleStyle = styleAccent
+	}
+	box := func(content string) string {
+		return titledBox(boxStyle, titleStyle, "Transactions", content)
+	}
 	if !m.txsLoaded {
-		return boxStyle.Render(title + "\n" + styleMuted.Render("loading…"))
+		return box(styleMuted.Render("loading…"))
 	}
 	if m.txsErr != "" {
-		return boxStyle.Render(title + "\n" + styleBad.Render("error: "+sanitizeTerminal(m.txsErr)))
+		return box(styleBad.Render("error: " + sanitizeTerminal(m.txsErr)))
 	}
 	if len(m.txs) == 0 {
-		return boxStyle.Render(title + "\n" + styleMuted.Render("no transactions yet"))
+		return box(styleMuted.Render("no transactions yet"))
 	}
 
 	maxRows, _ := listWindow(height, m.txCursor, len(m.txs))
 	offset := m.txWindowOffset(maxRows)
-	lines := []string{title}
+	var lines []string
 	for i := offset; i < offset+maxRows && i < len(m.txs); i++ {
 		prefix := "  "
 		// A missing cache entry yields "", the same value as a lookup that
@@ -1125,7 +1198,7 @@ func (m Model) renderTxList(height int) string {
 		}
 		lines = append(lines, prefix+line)
 	}
-	return boxStyle.Render(strings.Join(lines, "\n"))
+	return box(strings.Join(lines, "\n"))
 }
 
 // renderTxRow renders one transaction line. contractType is the cached
@@ -1243,9 +1316,13 @@ func (m Model) renderPollsList(height int) string {
 	if !m.pollsShowFinished {
 		scope = "active"
 	}
-	title := styleTitle.Render("Polls") + "  " + styleMuted.Render(scope)
+	// The polls screen is always the focused surface, so its title takes the
+	// accent the way a focused dashboard panel's does.
+	box := func(content string) string {
+		return titledBox(boxStyle, styleAccent, "Polls · "+scope, content)
+	}
 
-	// Loading / error / empty all render as the title plus one status line.
+	// Loading / error / empty each render as a single status line.
 	var status string
 	switch {
 	case !m.pollsLoaded:
@@ -1256,11 +1333,11 @@ func (m Model) renderPollsList(height int) string {
 		status = styleMuted.Render("no polls")
 	}
 	if status != "" {
-		return boxStyle.Render(title + "\n" + status)
+		return box(status)
 	}
 
 	maxRows, offset := listWindow(height, m.pollCursor, len(m.polls))
-	lines := []string{title}
+	var lines []string
 	for i := offset; i < offset+maxRows && i < len(m.polls); i++ {
 		prefix := "  "
 		line := m.renderPollRow(m.polls[i])
@@ -1270,7 +1347,7 @@ func (m Model) renderPollsList(height int) string {
 		}
 		lines = append(lines, prefix+line)
 	}
-	return boxStyle.Render(strings.Join(lines, "\n"))
+	return box(strings.Join(lines, "\n"))
 }
 
 // renderPollRow renders one poll line: status dot · title · weight-type ·
@@ -1362,8 +1439,6 @@ func (m Model) renderPollDetailModal() string {
 	// hostile ones. Everything here is on-chain poll-author data, cleaned
 	// before truncate so the column budget matches the printed text.
 	lines := []string{
-		styleTitle.Render("Poll"),
-		"",
 		field("Title", sanitizeTerminal(p.Title)),
 		field("Status", status),
 		field("Question", orDash(truncate(sanitizeTerminal(p.Question), 74))),
@@ -1421,12 +1496,7 @@ func (m Model) renderPollDetailModal() string {
 	if width < 40 {
 		width = 40
 	}
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(width).
-		Render(strings.Join(lines, "\n"))
+	modal := modalBox(width, "Poll", strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -1591,12 +1661,7 @@ func (m Model) renderSendModal() string {
 		body += "\n\n" + styleMuted.Render("press any key to close")
 	}
 
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(60).
-		Render(styleTitle.Render("Send GRC") + "\n\n" + body)
+	modal := modalBox(60, "Send GRC", body)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
@@ -1650,10 +1715,10 @@ func (m Model) renderSignModal() string {
 		body += "\n\n" + styleMuted.Render("signing…")
 	}
 
-	header := styleTitle.Render("Sign message")
 	// From the message step onwards, surface the signing address so it is
 	// always visible. Skipping it on signStepAddress avoids a redundant
 	// echo of the input field one line below.
+	header := ""
 	if m.sign.step != signStepAddress {
 		addr := m.sign.address.Value()
 		if addr == "" {
@@ -1661,7 +1726,7 @@ func (m Model) renderSignModal() string {
 		} else {
 			addr = styleAccent.Render(addr)
 		}
-		header += "\n" + styleLabel.Render("Signing as: ") + addr
+		header = styleLabel.Render("Signing as: ") + addr + "\n\n"
 	}
 
 	// Default width is comfortable for the input steps. On the result
@@ -1682,12 +1747,7 @@ func (m Model) renderSignModal() string {
 		modalWidth = max
 	}
 
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(modalWidth).
-		Render(header + "\n\n" + body)
+	modal := modalBox(modalWidth, "Sign message", header+body)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
@@ -1698,8 +1758,7 @@ func (m Model) renderSignModal() string {
 func (m Model) renderEditLabelModal() string {
 	// Same daemon-sourced address string the panel shows (see
 	// addressRowSegments), so it gets the same scrubbing on this surface.
-	header := styleTitle.Render("Edit label") + "\n" +
-		styleLabel.Render("Address: ") + styleAccent.Render(sanitizeTerminal(m.edit.address))
+	header := styleLabel.Render("Address: ") + styleAccent.Render(sanitizeTerminal(m.edit.address))
 
 	body := "Label:\n\n" + m.edit.label.View()
 	// Heads-up for the setaccount quirk (see runSetLabel): relabeling an
@@ -1724,12 +1783,7 @@ func (m Model) renderEditLabelModal() string {
 		modalWidth = max
 	}
 
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(modalWidth).
-		Render(header + "\n\n" + body)
+	modal := modalBox(modalWidth, "Edit label", header+"\n\n"+body)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
@@ -1758,12 +1812,7 @@ func (m Model) renderAddLabelModal() string {
 	if max := m.width - 2; modalWidth > max && max > 0 {
 		modalWidth = max
 	}
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(modalWidth).
-		Render(styleTitle.Render("Add address label") + "\n\n" + body)
+	modal := modalBox(modalWidth, "Add address label", body)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -1832,8 +1881,6 @@ func (m Model) renderTxDetailModal() string {
 	}
 
 	lines := []string{
-		styleTitle.Render("Transaction"),
-		"",
 		statusLine,
 		field("Category", sanitizeTerminal(tx.Category)),
 	}
@@ -1881,12 +1928,7 @@ func (m Model) renderTxDetailModal() string {
 	if width < 40 {
 		width = 40
 	}
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(width).
-		Render(strings.Join(lines, "\n"))
+	modal := modalBox(width, "Transaction", strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -1977,12 +2019,7 @@ func (m Model) renderUpdateModal() string {
 	if max := m.width - 4; modalWidth > max && max > 0 {
 		modalWidth = max
 	}
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(modalWidth).
-		Render(styleTitle.Render("Updates") + "\n\n" + body)
+	modal := modalBox(modalWidth, "Updates", body)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -2024,12 +2061,7 @@ func (m Model) renderConsentModal() string {
 	if max := m.width - 4; modalWidth > max && max > 0 {
 		modalWidth = max
 	}
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(modalWidth).
-		Render(styleTitle.Render("Help the peer list?") + "\n\n" + body)
+	modal := modalBox(modalWidth, "Help the peer list?", body)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -2044,7 +2076,6 @@ func (m Model) renderHelpModal() string {
 	}
 
 	lines := []string{
-		styleTitle.Render("Help"),
 		styleMuted.Render("A read-only view of a running Gridcoin wallet: balance, staking,"),
 		styleMuted.Render("lock, block height, your addresses, and recent transactions."),
 		styleMuted.Render("You can also send coins, sign a message, or manage address labels."),
@@ -2082,12 +2113,7 @@ func (m Model) renderHelpModal() string {
 	if max := m.width - 4; modalWidth > max && max > 0 {
 		modalWidth = max
 	}
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(modalWidth).
-		Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	modal := modalBox(modalWidth, "Help", lipgloss.JoinVertical(lipgloss.Left, lines...))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
 
@@ -2187,12 +2213,7 @@ func (m Model) renderConfigModal() string {
 		srcLine,
 	) + errLine + "\n\n" + hint
 
-	modal := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
-		BorderForeground(colorAccent).
-		Padding(1, 2).
-		Width(68).
-		Render(styleTitle.Render("Config") + "\n\n" + body)
+	modal := modalBox(68, "Config", body)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 }
