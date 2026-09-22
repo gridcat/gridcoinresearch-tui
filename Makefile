@@ -8,7 +8,7 @@ go.sum: go.mod
 	go mod download
 
 build: go.sum
-	go build -ldflags="$(LDFLAGS) -X main.version=$(VERSION)" -o $(BINARY) .
+	go build -ldflags="$(LDFLAGS) -X github.com/gridcat/gridcoinresearch-tui/internal/buildinfo.Version=$(VERSION)" -o $(BINARY) ./cmd/gridcoinresearch-tui
 
 run: build
 	./$(BINARY)

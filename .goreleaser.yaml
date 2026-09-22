@@ -4,12 +4,12 @@ project_name: gridcoinresearch-tui
 
 builds:
   - id: gridcoinresearch-tui
-    main: .
+    main: ./cmd/gridcoinresearch-tui
     binary: gridcoinresearch-tui
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -X github.com/gridcat/gridcoinresearch-tui/internal/buildinfo.Version={{.Version}}
     goos:
       - linux
       - darwin
