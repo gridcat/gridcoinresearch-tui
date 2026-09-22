@@ -1,0 +1,260 @@
+// This file owns everything about deciding "how do we talk to the daemon?".
+// It merges four sources of configuration into a single Config struct:
+//
+//  1. Explicit command-line flags (highest priority)
+//  2. Environment variables
+//  3. gridcoinresearch.conf, if present
+//  4. Built-in defaults baked into the binary (lowest priority)
+//
+// The cascade is important: you can always override the conf file with env
+// vars without editing it, and override env vars with a flag for a one-off
+// run. Missing conf file is NEVER a fatal error. The TUI must still work
+// remotely against a daemon on another host where there's no local conf.
+package config
+
+import (
+	"bufio" // line-by-line scanner for the conf file
+	"cmp"   // Go 1.22 "cmp.Or": returns the first non-zero arg in a list
+	"flag"  // standard library flag parser
+	"fmt"
+	"os"
+	"path/filepath" // joins paths with the right separator on every OS
+	"strings"
+	"time"
+
+	"github.com/gridcat/gridcoinresearch-tui/internal/state"
+)
+
+// Built-in defaults. The ports come from gridcoinresearchd's chainparamsbase.cpp
+// (mainnet RPC port 15715, testnet RPC port 25715).
+const (
+	defaultMainnetPort = "15715"
+	defaultTestnetPort = "25715"
+	defaultHost        = "127.0.0.1"
+	defaultRefresh     = 10 * time.Second
+)
+
+// Config is the fully-resolved connection + behaviour settings the rest of
+// the program consumes. It is a plain data struct; no methods hide state.
+type Config struct {
+	Testnet     bool
+	Host        string
+	Port        string
+	User        string
+	Password    string
+	Refresh     time.Duration
+	ConfPath    string // the conf file we actually read (for display in the config panel); "" if none
+	NetworkName string // "mainnet" or "testnet", handy for rendering
+	DebugLog    string // --debug-log path; "" disables. Stderr (crash dumps) is redirected here at startup.
+	// NoUpdateCheck disables the background GitHub release check (and thus the
+	// header "update available" badge). It does NOT disable the manual check
+	// behind the "u" key, which is an explicit, user-initiated action.
+	NoUpdateCheck bool
+	// PeerSharing is the opt-in peer-sharing setting resolved from the
+	// --peer-sharing flag and GRC_PEER_SHARING. Empty means the user did not
+	// specify one on this launch, so the stored answer in state.json wins.
+	// If that is empty too, they have never been asked.
+	//
+	// A flag or env value always overrides the stored answer and the answer is
+	// never written back: a scripted or containerised run must be able to force
+	// the setting for one launch without silently rewriting what the human
+	// chose. Forcing it on does create the random reporter identifier if there
+	// is not one yet, since reporting is impossible without one, but that is
+	// not an answer to the consent question and does not stand in for one.
+	PeerSharing state.PeerSharing
+}
+
+// parsePeerSharing reads the flag/env spellings into the tri-state. Anything
+// unrecognised (including empty) is "unspecified" rather than an error: a
+// typo in an env var should not stop the wallet dashboard from starting, it
+// should just leave the stored answer in charge.
+func parsePeerSharing(v string) state.PeerSharing {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return state.PeerSharingOn
+	case "0", "false", "no", "off":
+		return state.PeerSharingOff
+	default:
+		return state.PeerSharingUnset
+	}
+}
+
+// URL builds the JSON-RPC endpoint. Method receivers with a lowercase name
+// (c) and no pointer are "value receivers": they get a copy of Config, so
+// they cannot mutate it. That makes Config feel like an immutable value.
+func (c Config) URL() string {
+	return fmt.Sprintf("http://%s:%s/", c.Host, c.Port)
+}
+
+// confValues holds the handful of keys we care about from the wallet conf
+// file. It is unexported (lowercase name) because nothing outside this file
+// should need to see it.
+type confValues struct {
+	rpcuser     string
+	rpcpassword string
+	rpcport     string
+	rpcconnect  string
+}
+
+// LoadConfig is the single entry point used by main.go. It returns the
+// (Config, error) pair: Go functions conventionally return an error as the
+// last value instead of throwing exceptions.
+func LoadConfig(args []string) (Config, error) {
+	// We build a fresh FlagSet instead of using the package-level flag.Parse
+	// so tests can call LoadConfig with synthetic argv without interfering
+	// with the global flag state.
+	flags := flag.NewFlagSet("gridcoinresearch-tui", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+
+	// Each flags.String/flags.Bool returns a pointer. Dereferencing it later with
+	// *testnet / *hostFlag gives the value the user supplied (or the default).
+	var (
+		testnet      = flags.Bool("testnet", false, "use testnet conf path + default port")
+		mainnet      = flags.Bool("mainnet", false, "use mainnet (default)")
+		hostFlag     = flags.String("rpc-host", "", "RPC host (default 127.0.0.1)")
+		portFlag     = flags.String("rpc-port", "", "RPC port (default 15715 mainnet / 25715 testnet)")
+		userFlag     = flags.String("rpc-user", "", "RPC username (optional)")
+		passFlag     = flags.String("rpc-password", "", "RPC password (optional; prefer GRC_RPC_PASSWORD env var)")
+		confFlag     = flags.String("conf", "", "path to gridcoinresearch.conf (optional)")
+		refreshFlag  = flags.Duration("refresh", defaultRefresh, "refresh interval")
+		debugLogFlag = flags.String("debug-log", "", "redirect stderr (Go crash dumps) to this file for debugging")
+		noUpdateFlag = flags.Bool("no-update-check", false, "disable the background check for new releases on GitHub")
+		// Tri-state on purpose: "" means "not specified, use the stored
+		// answer", which is what lets a saved consent survive a normal launch
+		// while still letting a flag override it for a headless run.
+		peerSharingFlag = flags.String("peer-sharing", "", "share the peers you connect to with addnodes.gridcoin.club: on|off (default: ask once, then remember)")
+	)
+
+	if err := flags.Parse(args); err != nil {
+		return Config{}, err
+	}
+
+	if *testnet && *mainnet {
+		return Config{}, fmt.Errorf("--testnet and --mainnet are mutually exclusive")
+	}
+
+	cfg := Config{
+		Testnet:  *testnet,
+		Refresh:  *refreshFlag,
+		DebugLog: *debugLogFlag,
+	}
+	// Opt out of the background update check via flag or GRC_NO_UPDATE_CHECK.
+	// The env var accepts the common truthy spellings; anything else (including
+	// unset or an explicit "0"/"false") leaves the check enabled.
+	cfg.NoUpdateCheck = *noUpdateFlag
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GRC_NO_UPDATE_CHECK"))) {
+	case "1", "true", "yes", "on":
+		cfg.NoUpdateCheck = true
+	}
+	// Peer sharing, same shape: flag first, then env. Both accept the usual
+	// truthy/falsy spellings so `GRC_PEER_SHARING=1` does what it looks like.
+	cfg.PeerSharing = parsePeerSharing(*peerSharingFlag)
+	if cfg.PeerSharing == state.PeerSharingUnset {
+		cfg.PeerSharing = parsePeerSharing(os.Getenv("GRC_PEER_SHARING"))
+	}
+	if cfg.Testnet {
+		cfg.NetworkName = "testnet"
+	} else {
+		cfg.NetworkName = "mainnet"
+	}
+
+	// ----- layer 3: conf file (best-effort) -----
+	confPath := *confFlag
+	if confPath == "" {
+		confPath = defaultConfPath(cfg.Testnet)
+	}
+	vals := readConfFile(confPath)
+	if vals != nil {
+		cfg.ConfPath = confPath
+	} else if cfg.Testnet {
+		// Users often keep a single conf in the mainnet path even when running testnet.
+		if v := readConfFile(defaultConfPath(false)); v != nil {
+			vals = v
+			cfg.ConfPath = defaultConfPath(false)
+		}
+	}
+	// If we never found a conf file, pretend we got an empty one so the
+	// cmp.Or cascade below has a struct to read from instead of a nil pointer.
+	if vals == nil {
+		vals = &confValues{}
+	}
+
+	// cmp.Or walks its arguments left-to-right and returns the first one that
+	// is NOT the zero value ("" for strings). That is exactly the priority
+	// cascade we want: flag → env → conf → built-in default.
+	cfg.Host = cmp.Or(*hostFlag, os.Getenv("GRC_RPC_HOST"), vals.rpcconnect, defaultHost)
+	cfg.Port = cmp.Or(*portFlag, os.Getenv("GRC_RPC_PORT"), vals.rpcport, DefaultPort(cfg.Testnet))
+	// No final fallback for credentials on purpose: empty user/password is a
+	// valid, first-class case (many local wallets run without auth).
+	cfg.User = cmp.Or(*userFlag, os.Getenv("GRC_RPC_USER"), vals.rpcuser)
+	cfg.Password = cmp.Or(*passFlag, os.Getenv("GRC_RPC_PASSWORD"), vals.rpcpassword)
+
+	return cfg, nil
+}
+
+func DefaultPort(testnet bool) string {
+	if testnet {
+		return defaultTestnetPort
+	}
+	return defaultMainnetPort
+}
+
+// defaultConfPath returns ~/.GridcoinResearch/gridcoinresearch.conf for mainnet
+// or ~/.GridcoinResearch/testnet/gridcoinresearch.conf for testnet. An empty
+// string is returned if we can't even figure out the home directory.
+func defaultConfPath(testnet bool) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if testnet {
+		return filepath.Join(home, ".GridcoinResearch", "testnet", "gridcoinresearch.conf")
+	}
+	return filepath.Join(home, ".GridcoinResearch", "gridcoinresearch.conf")
+}
+
+// readConfFile parses a gridcoinresearch.conf file. The file format is the
+// same `key=value` plaintext format that bitcoind uses. We only extract the
+// handful of keys the TUI cares about and silently ignore everything else.
+//
+// Returns nil if the file can't be opened (missing, permission denied, etc.).
+// Missing conf is NOT an error; the caller treats nil as "no values, fall
+// through to env/defaults".
+func readConfFile(path string) *confValues {
+	if path == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	// defer runs the close when the function returns, no matter which path
+	// we take out. It is Go's equivalent of Python's "with" block.
+	defer f.Close()
+
+	v := &confValues{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue // skip blank lines and comments
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue // not a key=value line, skip
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		switch key {
+		case "rpcuser":
+			v.rpcuser = val
+		case "rpcpassword":
+			v.rpcpassword = val
+		case "rpcport":
+			v.rpcport = val
+		case "rpcconnect":
+			v.rpcconnect = val
+		}
+	}
+	return v
+}
