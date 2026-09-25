@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -11,6 +13,7 @@ import (
 	"github.com/gridcat/gridcoinresearch-tui/internal/rpc"
 	"github.com/gridcat/gridcoinresearch-tui/internal/theme"
 	"github.com/gridcat/gridcoinresearch-tui/internal/ui"
+	"github.com/mattn/go-runewidth"
 )
 
 // txRefreshDepth is how many blocks back listsinceblock holds its cursor,
@@ -165,7 +168,11 @@ func mergeTransactions(existing, delta []rpc.Transaction) ([]rpc.Transaction, bo
 //	maxRows: how many data rows fit inside the box this frame
 //
 // We slide offset just enough to keep the cursor in view.
-func (m Model) renderTxList(height int) string {
+//
+// compact is the narrow-terminal dashboard (see renderCompactDashboard): rows
+// drop to icon, amount, age and counterparty, and the position counter moves
+// into the bottom border so it costs no row.
+func (m Model) renderTxList(height int, compact bool) string {
 	border := theme.Border
 	if m.focusedArea == focusTx {
 		border = theme.BorderFocused
@@ -175,8 +182,9 @@ func (m Model) renderTxList(height int) string {
 	if m.focusedArea == focusTx {
 		titleStyle = theme.Accent
 	}
+	footer := ""
 	box := func(content string) string {
-		return ui.TitledBox(boxStyle, titleStyle, "Transactions", content)
+		return ui.TitledBoxFooter(boxStyle, titleStyle, "Transactions", footer, content)
 	}
 	if !m.txsLoaded {
 		return box(theme.Muted.Render("loading…"))
@@ -188,10 +196,55 @@ func (m Model) renderTxList(height int) string {
 		return box(theme.Muted.Render("no transactions yet"))
 	}
 
-	maxRows, _ := ui.ListWindow(height, m.txCursor, len(m.txs))
+	header := txHeaderShown(height)
+	listHeight := height
+	if header {
+		listHeight--
+	}
+	maxRows, _ := ui.ListWindow(listHeight, m.txCursor, len(m.txs))
 	offset := m.txWindowOffset(maxRows)
+	end := offset + maxRows
+	if end > len(m.txs) {
+		end = len(m.txs)
+	}
+	// Rows are clipped to the panel, never wrapped: a wrapped row would make
+	// the box taller than renderDashboard budgeted and Bubble Tea would drop
+	// the top of the frame. Same clamp as the address panel's pan.
+	rowWidth := m.panelRowWidth()
+	hoff := m.txHScroll
+	maxScroll := m.txMaxScroll(m.txs[offset:end], rowWidth, compact)
+	if hoff > maxScroll {
+		hoff = maxScroll
+	}
+	// The position counter and ←/→ hint: in the bottom border in the compact
+	// layout, at the right end of the header row in the full one (where the
+	// address panel shows its own next to the tabs).
+	status := ""
+	if compact {
+		footer = fmt.Sprintf("%d/%d", m.txCursor+1, len(m.txs))
+		if maxScroll > 0 {
+			footer = "←/→ " + footer
+		}
+	} else {
+		if len(m.txs) > maxRows {
+			status = fmt.Sprintf("%d/%d", m.txCursor+1, len(m.txs))
+		}
+		if m.focusedArea == focusTx && maxScroll > 0 {
+			status = strings.TrimSpace(status + "  ←/→")
+		}
+	}
 	var lines []string
-	for i := offset; i < offset+maxRows && i < len(m.txs); i++ {
+	if header {
+		labels := false
+		for _, tx := range m.txs[offset:end] {
+			if tx.Address != "" && m.addressLabel(tx.Address) != "" {
+				labels = true
+				break
+			}
+		}
+		lines = append(lines, txHeaderRow(compact, labels, rowWidth, hoff, status))
+	}
+	for i := offset; i < end; i++ {
 		prefix := "  "
 		// A missing cache entry yields "", the same value as a lookup that
 		// came back with no type. The row renders both as a generic
@@ -199,7 +252,7 @@ func (m Model) renderTxList(height int) string {
 		// or a contract the daemon itself could not classify. Only the
 		// detail modal needs to tell the two apart.
 		tx := m.txs[i]
-		line := renderTxRowLabeled(tx, m.anonymous, m.txContracts[tx.TxID], m.addressLabel(tx.Address))
+		line := ui.ClipSegments(m.txSegments(tx, compact, rowWidth), hoff, rowWidth)
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
 			// tx list leaves the cursor as a silent bookmark, symmetric
@@ -207,11 +260,130 @@ func (m Model) renderTxList(height int) string {
 			// whole row via fillBackground (the same edge-to-edge highlight
 			// the addresses panel uses).
 			prefix = theme.Accent.Background(theme.ColorRowSelected).Render("▸ ")
-			line = ui.FillBackground(line, m.panelRowWidth())
+			line = ui.FillBackground(line, rowWidth)
 		}
 		lines = append(lines, prefix+line)
 	}
 	return box(strings.Join(lines, "\n"))
+}
+
+// txHeaderShown reports whether a Transactions box of the given height has
+// room for the column titles. They take a row, so a box that fits only one
+// row keeps it for a transaction. txListRows uses the same test so the key
+// handlers and the renderer agree on how many rows are visible.
+func txHeaderShown(height int) bool {
+	return height-2 >= 2
+}
+
+// txHeaderRow is the column-title row above the transactions. Each title is
+// placed over its column at the same horizontal offset as the rows, so the
+// titles pan with the list; one that doesn't fully fit in view is left out
+// rather than cut. status (the counter and ←/→ hint) is pinned to the right
+// end and doesn't pan. labels adds the Label title, which only makes sense
+// when a visible row has a label.
+func txHeaderRow(compact, labels bool, rowWidth, hoff int, status string) string {
+	// The column widths of txCompactSegments and txRowSegments; the first
+	// 2 columns are the icon and its space, and the 2-wide untitled ones are
+	// the gaps between columns.
+	type col struct {
+		title string
+		width int
+		right bool
+	}
+	cols := []col{{"", 2, false}, {"Status", 10, false}, {"Amount", 18, true}, {"", 2, false},
+		{"Address", 16, false}, {"", 2, false}, {"Time", 12, false}, {"", 2, false}, {"Category", 10, false}}
+	if labels {
+		cols = append(cols, col{"", 2, false}, col{"Label", 5, false})
+	}
+	if compact {
+		cols = []col{{"", 2, false}, {"Amount", 13, true}, {"", 2, false}, {"Age", 6, true}, {"", 2, false}, {"Address", 7, false}}
+	}
+
+	width := rowWidth
+	if status != "" {
+		width -= runewidth.StringWidth(status) + 2
+	}
+	// A panned row spends its first column on the ‹ marker, which shifts
+	// everything after it right by one; the titles follow.
+	lead := 0
+	if hoff > 0 {
+		lead = 1
+	}
+	buf := []byte(strings.Repeat(" ", max(width, 0)))
+	x := 0
+	for _, c := range cols {
+		start := x
+		if c.right {
+			start += c.width - len(c.title)
+		}
+		if pos := start - hoff + lead; c.title != "" && pos >= lead && pos+len(c.title) <= width {
+			copy(buf[pos:], c.title)
+		}
+		x += c.width
+	}
+	line := theme.Label.Render(string(buf))
+	if status != "" {
+		line += "  " + theme.Muted.Render(status)
+	}
+	return "  " + line
+}
+
+// txSegments builds a row of the dashboard list, filling in the cached
+// contract type and the saved counterparty label. rowWidth only matters in
+// compact mode, where the counterparty column takes whatever is left.
+func (m Model) txSegments(tx rpc.Transaction, compact bool, rowWidth int) []ui.Seg {
+	contractType, label := m.txContracts[tx.TxID], m.addressLabel(tx.Address)
+	if compact {
+		return txCompactSegments(tx, m.anonymous, contractType, label, rowWidth)
+	}
+	return txRowSegments(tx, m.anonymous, contractType, label)
+}
+
+// txCompactSegments is the narrow-terminal row: icon, amount without the
+// " GRC" unit, age, then the saved label or the short address in whatever
+// width is left. Status and category columns are dropped; the icon carries the
+// status and the detail modal has the rest.
+func txCompactSegments(tx rpc.Transaction, anonymous bool, contractType, label string, rowWidth int) []ui.Seg {
+	st := format.ClassifyTransaction(tx)
+	iconStyle, ok := theme.TxKindStyle[st.Kind]
+	if !ok {
+		iconStyle = theme.Muted
+	}
+	amount, amountStyle := txAmount(tx, anonymous)
+	amount = strings.TrimSpace(strings.TrimSuffix(amount, " GRC"))
+	// Pad to the column but never cut: a clipped amount would read as a
+	// different number. A rare wider one just pushes its row's tail right.
+	if runewidth.StringWidth(amount) < 13 {
+		amount = ui.FixedCell(amount, 13, true)
+	}
+	party := format.ShortAddress(format.SanitizeTerminal(txCounterparty(tx, contractType)))
+	if tx.Address != "" && label != "" {
+		party = format.SanitizeTerminal(label)
+	}
+	// icon, space, amount 13, gap 2, age 6, gap 2 = 25 columns before it.
+	partyWidth := rowWidth - 25
+	if partyWidth < 10 {
+		partyWidth = 10
+	}
+	return []ui.Seg{{Text: st.Icon, Style: iconStyle}, {Text: " ", Style: theme.Muted},
+		{Text: amount, Style: amountStyle}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(compactAge(tx.Time), 6, true), Style: theme.Muted}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.Truncate(party, partyWidth), Style: theme.TxAddrCol.UnsetWidth()}}
+}
+
+// compactAge is FormatRelativeTime squeezed into 6 columns: "5m", "3d",
+// "now", and "Jan 26" (month and year) once it is older than a week.
+func compactAge(ts int64) string {
+	age := format.FormatRelativeTime(ts)
+	switch {
+	case age == "just now":
+		return "now"
+	case strings.HasSuffix(age, " ago"):
+		return strings.TrimSuffix(age, " ago")
+	case ts > 0:
+		return time.Unix(ts, 0).Format("Jan 06")
+	}
+	return age
 }
 
 // renderTxRow renders one transaction line. contractType is the cached
@@ -232,6 +404,42 @@ func renderTxRowLabeled(tx rpc.Transaction, anonymous bool, contractType, label 
 	return b.String()
 }
 
+// txAmount is a row's signed amount and its colour: red out, green in,
+// masked and muted in anonymous mode.
+func txAmount(tx rpc.Transaction, anonymous bool) (string, lipgloss.Style) {
+	if anonymous {
+		return format.MaskedAmount, theme.Muted
+	}
+	switch {
+	case tx.Amount < 0:
+		return format.FormatGRC(tx.Amount), theme.Warn
+	case tx.Amount > 0:
+		return format.FormatGRC(tx.Amount), theme.Good
+	}
+	return format.FormatGRC(tx.Amount), theme.Value
+}
+
+// txCounterparty is what a row shows in its address column: the address, or
+// "(stake)" / "(vote)" etc. for the transactions that have none. Unsanitized;
+// callers sanitize before measuring.
+func txCounterparty(tx rpc.Transaction, contractType string) string {
+	if tx.Address == "" && (tx.Category == "generate" || tx.Category == "immature") {
+		return "(stake)"
+	}
+	if format.IsContractCandidate(tx) {
+		// A beacon or vote has no counterparty address, so this column would
+		// otherwise be blank and the row would read as broken data. Name the
+		// contract instead. Every label stays under ShortAddress's 12-char
+		// eliding threshold ("(sidestake)", the longest of the daemon's
+		// contract types, is 11), so these pass through it unaltered.
+		if contractType == "" {
+			contractType = "contract"
+		}
+		return "(" + contractType + ")"
+	}
+	return tx.Address
+}
+
 // txRowSegments builds the coloured runs for a transaction row. The optional
 // saved label is its own final column and is shortened to preserve the table's
 // compact, single-line layout.
@@ -241,42 +449,19 @@ func txRowSegments(tx rpc.Transaction, anonymous bool, contractType, label strin
 	if !ok {
 		iconStyle = theme.Muted
 	}
-	var amount string
-	amountStyle := theme.Value.Width(18).Align(lipgloss.Right)
-	if anonymous {
-		amount = format.MaskedAmount
-		amountStyle = theme.Muted.Width(18).Align(lipgloss.Right)
-	} else {
-		switch {
-		case tx.Amount < 0:
-			amountStyle = theme.Warn.Width(18).Align(lipgloss.Right)
-		case tx.Amount > 0:
-			amountStyle = theme.Good.Width(18).Align(lipgloss.Right)
-		}
-		amount = format.FormatGRC(tx.Amount)
-	}
-
-	addr := tx.Address
-	if addr == "" && (tx.Category == "generate" || tx.Category == "immature") {
-		addr = "(stake)"
-	} else if format.IsContractCandidate(tx) {
-		// A beacon or vote has no counterparty address, so this column would
-		// otherwise be blank and the row would read as broken data. Name the
-		// contract instead. Every label stays under ShortAddress's 12-char
-		// eliding threshold ("(sidestake)", the longest of the daemon's
-		// contract types, is 11), so these pass through it unaltered.
-		if contractType == "" {
-			contractType = "contract"
-		}
-		addr = "(" + contractType + ")"
-	}
+	amount, amountStyle := txAmount(tx, anonymous)
+	addr := txCounterparty(tx, contractType)
+	// Every cell is padded to its column width by FixedCell, so the styles
+	// carry colour only: a style Width() would re-pad a cell that
+	// ClipSegments cut short and push the row past the panel edge.
+	//
 	// Sanitized after the label is assembled, so the daemon-supplied contract
 	// type is covered along with tx.Address, and before ShortAddress so its
 	// length check counts the characters that will actually be printed.
 	segs := []ui.Seg{{Text: st.Icon, Style: iconStyle}, {Text: " ", Style: theme.Muted},
-		{Text: ui.FixedCell(st.Label, 10, false), Style: theme.TxStatusCol}, {Text: ui.FixedCell(amount, 18, true), Style: amountStyle}, {Text: "  ", Style: theme.Muted},
-		{Text: ui.FixedCell(format.ShortAddress(format.SanitizeTerminal(addr)), 16, false), Style: theme.TxAddrCol}, {Text: "  ", Style: theme.Muted},
-		{Text: ui.FixedCell(format.FormatRelativeTime(tx.Time), 12, false), Style: theme.TxTimeCol.Foreground(theme.ColorMuted)}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(st.Label, 10, false), Style: theme.TxStatusCol.UnsetWidth()}, {Text: ui.FixedCell(amount, 18, true), Style: amountStyle}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(format.ShortAddress(format.SanitizeTerminal(addr)), 16, false), Style: theme.TxAddrCol.UnsetWidth()}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(format.FormatRelativeTime(tx.Time), 12, false), Style: theme.TxTimeCol.UnsetWidth().Foreground(theme.ColorMuted)}, {Text: "  ", Style: theme.Muted},
 		{Text: ui.FixedCell(format.SanitizeTerminal(tx.Category), 10, false), Style: theme.Muted}}
 	if tx.Address != "" && label != "" {
 		// Keep the label column compact but give names substantially more room

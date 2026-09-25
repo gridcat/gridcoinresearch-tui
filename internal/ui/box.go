@@ -33,9 +33,24 @@ import (
 // panel has focus). A title too wide for the edge is truncated; one that can't
 // fit at all leaves a plain edge behind.
 func TitledBox(Style lipgloss.Style, titleStyle lipgloss.Style, title, content string) string {
+	return TitledBoxFooter(Style, titleStyle, title, "", content)
+}
+
+// TitledBoxFooter is TitledBox with a second, muted label right-aligned in
+// the bottom edge, for status that shouldn't cost a content row (a "3/30"
+// position counter, say). An empty footer draws the plain bottom edge.
+//
+//	╭─ Transactions ───────────────╮
+//	│ ▸ 12:03  +1.25   confirmed   │
+//	╰──────────────────────── 3/30 ─╯
+func TitledBoxFooter(Style lipgloss.Style, titleStyle lipgloss.Style, title, footer, content string) string {
 	b := Style.GetBorderStyle()
 	edge := lipgloss.NewStyle().Foreground(Style.GetBorderTopForeground())
-	body := Style.BorderTop(false).Render(content)
+	bodyStyle := Style.BorderTop(false)
+	if footer != "" {
+		bodyStyle = bodyStyle.BorderBottom(false)
+	}
+	body := bodyStyle.Render(content)
 	// Measure the body rather than trusting Width(): content wider than the
 	// Style's width pushes the box out, and the top edge has to follow it or
 	// the box loses its right corner.
@@ -43,26 +58,40 @@ func TitledBox(Style lipgloss.Style, titleStyle lipgloss.Style, title, content s
 	if w < 2 {
 		w = 2
 	}
+	out := edgeWithLabel(edge, titleStyle, b.TopLeft, b.Top, b.TopRight, title, w, false) + "\n" + body
+	if footer != "" {
+		out += "\n" + edgeWithLabel(edge, theme.Muted, b.BottomLeft, b.Bottom, b.BottomRight, footer, w, true)
+	}
+	return out
+}
 
-	// "╭─ " + label + " ─╮" spends 6 columns on chrome before a title fits.
-	// Truncate measures with go-runewidth and the edge is laid out with
-	// lipgloss.Width; the two disagree on a few graphemes (an emoji carrying a
-	// variation selector counts 1 and 2), so the fill is re-checked against the
-	// label lipgloss will actually draw. A label that still doesn't fit gives
-	// up its space rather than pushing the closing corner off the end.
-	label := Truncate(title, w-6)
+// edgeWithLabel draws one horizontal border edge w columns wide carrying
+// label, flush left ("╭─ label ───╮") or flush right ("╰─── label ─╯").
+//
+// "╭─ " + label + " ─╮" spends 6 columns on chrome before a label fits.
+// Truncate measures with go-runewidth and the edge is laid out with
+// lipgloss.Width; the two disagree on a few graphemes (an emoji carrying a
+// variation selector counts 1 and 2), so the fill is re-checked against the
+// label lipgloss will actually draw. A label that still doesn't fit gives up
+// its space rather than pushing the closing corner off the end.
+func edgeWithLabel(edge, labelStyle lipgloss.Style, left, line, right, text string, w int, alignRight bool) string {
+	label := Truncate(text, w-6)
 	fill := 0
 	if label != "" {
 		label = " " + label + " "
 		fill = w - 3 - lipgloss.Width(label)
 	}
 	if fill < 1 {
-		return edge.Render(b.TopLeft+strings.Repeat(b.Top, w-2)+b.TopRight) + "\n" + body
+		return edge.Render(left + strings.Repeat(line, w-2) + right)
 	}
-	top := edge.Render(b.TopLeft+b.Top) +
-		titleStyle.Render(label) +
-		edge.Render(strings.Repeat(b.Top, fill)+b.TopRight)
-	return top + "\n" + body
+	if alignRight {
+		return edge.Render(left+strings.Repeat(line, fill)) +
+			labelStyle.Render(label) +
+			edge.Render(line+right)
+	}
+	return edge.Render(left+line) +
+		labelStyle.Render(label) +
+		edge.Render(strings.Repeat(line, fill)+right)
 }
 
 // ModalBox renders a dialog the way TitledBox renders a panel: a

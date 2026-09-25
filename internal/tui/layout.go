@@ -6,6 +6,45 @@ import (
 	"github.com/gridcat/gridcoinresearch-tui/internal/ui"
 )
 
+// minWidth and minHeight are the smallest terminal the TUI draws in. Below
+// either one every screen is swapped for a "too small" notice (see
+// renderTooSmall) and keys other than Ctrl+C are ignored.
+const (
+	minWidth  = 42
+	minHeight = 24
+)
+
+// The full dashboard needs at least fullMinWidth×fullMinHeight; a smaller
+// terminal gets the compact layout (see renderCompactDashboard). fullMinBody
+// is the second condition: the rows the full header, stats and footer must
+// leave for the two lists. Those boxes grow with the wallet (researcher rows,
+// an error line, stats wrapping below ~72 columns), and with fewer than
+// fullMinBody rows left the full layout would show only a transaction or two,
+// so the dashboard stays compact even on a large enough terminal.
+const (
+	fullMinWidth  = 60
+	fullMinHeight = 30
+	fullMinBody   = 10
+)
+
+// compactFor reports whether the dashboard should use its compact layout,
+// given the body height the full layout would leave (see bodyHeight).
+func (m Model) compactFor(available int) bool {
+	return m.width < fullMinWidth || m.height < fullMinHeight || available < fullMinBody
+}
+
+// isCompact is compactFor for callers that haven't rendered the full layout.
+// The size test comes first so a small terminal skips the render entirely.
+func (m Model) isCompact() bool {
+	return m.width < fullMinWidth || m.height < fullMinHeight || m.availableBodyHeight() < fullMinBody
+}
+
+// tooSmall reports whether the terminal is under the minimum size. A zero
+// width means no WindowSizeMsg has arrived yet, which is "unknown", not small.
+func (m Model) tooSmall() bool {
+	return m.width > 0 && (m.width < minWidth || m.height < minHeight)
+}
+
 // bodyHeight is the vertical budget (in rows) the two scrollable panels share:
 // the terminal height minus the three fixed boxes. It takes the already-rendered
 // boxes so the only caller with them in hand (renderDashboard) doesn't re-render
@@ -97,15 +136,50 @@ func (m Model) addrMaxScroll(addrs []rpc.ReceivedAddress, rowWidth int) int {
 	return 0
 }
 
+// txMaxScroll is addrMaxScroll for the Transactions panel. It measures only
+// the rows passed in (the visible window) rather than the whole history, since
+// View runs every frame and a long-lived wallet can hold thousands of txs.
+func (m Model) txMaxScroll(txs []rpc.Transaction, rowWidth int, compact bool) int {
+	widest := 0
+	for _, tx := range txs {
+		if w := ui.SegmentsWidth(m.txSegments(tx, compact, rowWidth)); w > widest {
+			widest = w
+		}
+	}
+	if max := widest - rowWidth; max > 0 {
+		return max
+	}
+	return 0
+}
+
+// visibleTxs is the slice of m.txs the Transactions panel shows this frame.
+func (m Model) visibleTxs() []rpc.Transaction {
+	maxRows := m.txListRows()
+	offset := m.txWindowOffset(maxRows)
+	end := offset + maxRows
+	if end > len(m.txs) {
+		end = len(m.txs)
+	}
+	return m.txs[offset:end]
+}
+
 // txListRows returns the number of transaction rows that fit in the current
 // dashboard layout. Key handling uses it to preserve the visible transaction
 // window between frames.
 func (m Model) txListRows() int {
-	available := m.availableBodyHeight()
-	addrs := m.renderAddresses(m.addrPanelHeight(available))
-	txHeight := available - lipgloss.Height(addrs)
-	if txHeight < 3 {
-		txHeight = 3
+	var txHeight int
+	if m.isCompact() {
+		txHeight = m.compactBodyHeight(m.renderCompactStats())
+	} else {
+		available := m.availableBodyHeight()
+		addrs := m.renderAddresses(m.addrPanelHeight(available), false)
+		txHeight = available - lipgloss.Height(addrs)
+		if txHeight < 3 {
+			txHeight = 3
+		}
+	}
+	if txHeaderShown(txHeight) {
+		txHeight--
 	}
 	maxRows, _ := ui.ListWindow(txHeight, 0, len(m.txs))
 	return maxRows

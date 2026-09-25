@@ -160,6 +160,12 @@ type Model struct {
 	// focus leaves the panel so re-entering always starts at the left edge.
 	addrHScroll int
 
+	// txHScroll is the same horizontal offset for the Transactions panel, so a
+	// row wider than a narrow terminal pans instead of wrapping (a wrapped row
+	// doubles the panel's height and pushes the top of the dashboard off
+	// screen). Reset to 0 whenever focus changes panels.
+	txHScroll int
+
 	// addrPanelRows is the user's chosen height (in rows) for the My Addresses
 	// panel, set by the +/-/0 resize keys. 0 means "auto": fall back to the
 	// computed default (see addrPanelHeight). Session-only; never persisted.
@@ -316,10 +322,14 @@ func NewModel(cfg config.Config, c *rpc.Client) Model {
 		pollResultErr:     make(map[string]string),
 		send:              sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
 		sign:              signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
-		conf:              newConfigState(cfg, sharing == state.PeerSharingOn),
-		edit:              editLabelState{label: labelInput},
-		add:               addLabelState{address: addAddress, label: addLabel},
-		addrSearch:        addrSearch,
+		conf: newConfigState(
+			cfg,
+			sharing == state.PeerSharingOn,
+			st.Names[state.NameKey(cfg.Testnet, cfg.Host, cfg.Port)],
+		),
+		edit:       editLabelState{label: labelInput},
+		add:        addLabelState{address: addAddress, label: addLabel},
+		addrSearch: addrSearch,
 	}
 }
 

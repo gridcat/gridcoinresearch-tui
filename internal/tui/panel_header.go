@@ -8,8 +8,27 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gridcat/gridcoinresearch-tui/internal/format"
 	"github.com/gridcat/gridcoinresearch-tui/internal/rpc"
+	"github.com/gridcat/gridcoinresearch-tui/internal/state"
 	"github.com/gridcat/gridcoinresearch-tui/internal/theme"
+	"github.com/gridcat/gridcoinresearch-tui/internal/ui"
 )
+
+// walletName is the user's local name for the wallet this TUI is talking to,
+// "" if they haven't given it one. Looked up by endpoint on every call, so
+// pointing the config panel at another daemon switches to that one's name.
+func (m Model) walletName() string {
+	return m.state.Names[state.NameKey(m.cfg.Testnet, m.cfg.Host, m.cfg.Port)]
+}
+
+// windowTitle is what the terminal shows for this TUI, which in Termux is
+// the label in the session drawer: the wallet's name when it has one, so a
+// row of sessions can be told apart before switching to any of them.
+func (m Model) windowTitle() string {
+	if name := m.walletName(); name != "" {
+		return name
+	}
+	return "gridcoinresearch-tui"
+}
 
 func fetchChain(c *rpc.Client) tea.Cmd {
 	return func() tea.Msg {
@@ -25,22 +44,33 @@ func fetchPeers(c *rpc.Client) tea.Cmd {
 	}
 }
 
+// networkMismatch is the warning shown in place of the network badge when
+// the daemon runs on the other network than the TUI was started for, or "".
+func (m Model) networkMismatch() string {
+	if m.chain.Chain == "test" && !m.cfg.Testnet {
+		return "✗ daemon is TESTNET, TUI is mainnet"
+	} else if m.chain.Chain == "main" && m.cfg.Testnet {
+		return "✗ daemon is MAINNET, TUI is testnet"
+	}
+	return ""
+}
+
 // renderHeader draws the top bar: program name on the left, network badge
 // in the middle, current block height right-aligned. We measure the two
 // rendered halves with lipgloss.Width and pad the gap with spaces so the
-// right half lands at the right edge of the box.
+// right half lands at the right edge of the box. A named wallet carries its
+// name in the top edge of the box, and the program name drops out of the
+// line, since the wallet's name is what tells one TUI from another.
 func (m Model) renderHeader() string {
 	networkBadge := theme.MainnetBadge.Render("● mainnet")
 	if m.cfg.Testnet {
 		networkBadge = theme.TestnetBadge.Render("● testnet")
 	}
-	if m.chain.Chain == "test" && !m.cfg.Testnet {
-		networkBadge = theme.Bad.Render("✗ daemon is TESTNET, TUI is mainnet")
-	} else if m.chain.Chain == "main" && m.cfg.Testnet {
-		networkBadge = theme.Bad.Render("✗ daemon is MAINNET, TUI is testnet")
+	if warn := m.networkMismatch(); warn != "" {
+		networkBadge = theme.Bad.Render(warn)
 	}
 
-	title := theme.Title.Render("gridcoinresearch-tui")
+	name := m.walletName()
 	blockInfo := ""
 	if m.chain.Blocks > 0 {
 		blockInfo = theme.Muted.Render("block " + format.GroupThousandsInt64(m.chain.Blocks))
@@ -73,7 +103,11 @@ func (m Model) renderHeader() string {
 	}
 	rightSide := strings.Join(rightParts, "  ")
 
-	leftHalf := lipgloss.JoinHorizontal(lipgloss.Top, title, "  ", networkBadge)
+	leftHalf := networkBadge
+	if name == "" {
+		leftHalf = lipgloss.JoinHorizontal(lipgloss.Top,
+			theme.Title.Render("gridcoinresearch-tui"), "  ", networkBadge)
+	}
 	gap := m.width - lipgloss.Width(leftHalf) - lipgloss.Width(rightSide) - 4
 	if gap < 1 {
 		gap = 1
@@ -84,7 +118,11 @@ func (m Model) renderHeader() string {
 		rightSide,
 	)
 
-	return theme.Border.Width(m.width - 2).Render(line)
+	box := theme.Border.Width(m.width - 2)
+	if name != "" {
+		return ui.TitledBox(box, theme.Title, name, line)
+	}
+	return box.Render(line)
 }
 
 // onChainMsg handles chainMsg. Split out of Update so the whole of this

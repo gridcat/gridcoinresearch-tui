@@ -51,10 +51,15 @@ func fetchAddrOwnership(c *rpc.Client, addrs []string) tea.Cmd {
 // self-documenting (e.g. "1.Mine 12"). The active tab is bracketed and
 // accented; inactive tabs are muted and padded with spaces so the bar's width
 // doesn't jump when the selection moves. Counts come from addrTabCounts.
-func (m Model) renderAddrTabs() string {
+// compact drops the parentheses and the search hint so the bar fits a
+// 42-column terminal; "/" is still listed under "?".
+func (m Model) renderAddrTabs(compact bool) string {
 	mine, others, all := m.addrTabCounts()
 	seg := func(tab addrTab, key, label string, n int) string {
 		text := fmt.Sprintf("%s.%s (%d)", key, label, n)
+		if compact {
+			text = fmt.Sprintf("%s %s %d", key, label, n)
+		}
 		if m.addrTab == tab {
 			return theme.Accent.Render("[" + text + "]")
 		}
@@ -65,6 +70,9 @@ func (m Model) renderAddrTabs() string {
 		seg(addrTabOthers, "2", "Others", others), " ",
 		seg(addrTabAll, "3", "All", all),
 	)
+	if compact {
+		return tabs
+	}
 	return tabs + theme.Muted.Render("  [/] search")
 }
 
@@ -74,7 +82,11 @@ func (m Model) renderAddrTabs() string {
 // selected row) only when m.focusedArea == focusAddr. Rows are drawn from the
 // active tab's slice (see visibleAddresses), with the tab bar as the header
 // and an inline search row while a query is being edited or applied.
-func (m Model) renderAddresses(maxHeight int) string {
+//
+// compact is the narrow-terminal dashboard, where this panel takes the whole
+// body when it is the active tab: it fills maxHeight, and the position
+// counter and ←/→ hint move from the tab bar into the bottom border.
+func (m Model) renderAddresses(maxHeight int, compact bool) string {
 	border := theme.Border
 	if m.focusedArea == focusAddr {
 		border = theme.BorderFocused
@@ -85,7 +97,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 	// size when switching tabs instead of snapping to each tab's row count. In
 	// auto mode we leave the box content-sized so a near-empty panel yields its
 	// slack to Transactions.
-	if m.addrPanelRows > 0 {
+	if m.addrPanelRows > 0 || compact {
 		box = box.Height(maxHeight - 2)
 	}
 
@@ -93,8 +105,9 @@ func (m Model) renderAddresses(maxHeight int) string {
 	if m.focusedArea == focusAddr {
 		titleStyle = theme.Accent
 	}
+	footer := ""
 	titled := func(content string) string {
-		return ui.TitledBox(box, titleStyle, "My Addresses", content)
+		return ui.TitledBoxFooter(box, titleStyle, "My Addresses", footer, content)
 	}
 	if !m.addrsLoaded {
 		return titled(theme.Muted.Render("loading…"))
@@ -143,7 +156,7 @@ func (m Model) renderAddresses(maxHeight int) string {
 		if query != "" {
 			empty = "no labels or addresses match"
 		}
-		lines := []string{m.renderAddrTabs()}
+		lines := []string{m.renderAddrTabs(compact)}
 		if showSearch {
 			lines = append(lines, searchRow)
 		}
@@ -181,12 +194,23 @@ func (m Model) renderAddresses(maxHeight int) string {
 	// Header: tab bar, plus a "cursor/total" indicator when the list is longer
 	// than the window, and a ←/→ hint once a row is wide enough to scroll and
 	// the panel is focused.
-	header := m.renderAddrTabs()
+	header := m.renderAddrTabs(compact)
+	counter, arrows := "", ""
 	if len(visible) > maxRows {
-		header += theme.Muted.Render(fmt.Sprintf("  %d/%d", m.addrCursor+1, len(visible)))
+		counter = fmt.Sprintf("%d/%d", m.addrCursor+1, len(visible))
 	}
 	if m.focusedArea == focusAddr && maxScroll > 0 {
-		header += theme.Muted.Render("  ←/→")
+		arrows = "←/→"
+	}
+	if compact {
+		footer = strings.TrimSpace(arrows + " " + counter)
+	} else {
+		if counter != "" {
+			header += theme.Muted.Render("  " + counter)
+		}
+		if arrows != "" {
+			header += theme.Muted.Render("  " + arrows)
+		}
 	}
 	lines := []string{header}
 	if showSearch {

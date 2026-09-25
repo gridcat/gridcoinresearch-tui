@@ -6,6 +6,15 @@ import (
 )
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While the "too small" notice hides the screen, keys would act on a
+	// modal or list the user can't see (an Enter could confirm a send), so
+	// only Ctrl+C gets through.
+	if m.tooSmall() {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	switch m.mode {
 	case modeSend:
 		return m.handleSendKey(msg)
@@ -137,17 +146,39 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.focusedArea = focusTx
 		}
-		// Start each visit to the address panel from the left edge.
+		// Start each visit to either panel from the left edge.
 		m.addrHScroll = 0
+		m.txHScroll = 0
 		return m, nil
 	case "left", "h":
 		if m.focusedArea == focusAddr && m.addrHScroll > 0 {
 			m.addrHScroll--
 		}
+		if m.focusedArea == focusTx && m.txHScroll > 0 {
+			// Pull a stale offset (the terminal grew since) back into range
+			// first so the key never looks dead.
+			if max := m.txMaxScroll(
+				m.visibleTxs(),
+				m.panelRowWidth(),
+				m.isCompact(),
+			); m.txHScroll > max {
+				m.txHScroll = max
+			}
+			if m.txHScroll > 0 {
+				m.txHScroll--
+			}
+		}
 		return m, nil
 	case "right", "l":
 		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.visibleAddresses(), m.panelRowWidth()) {
 			m.addrHScroll++
+		}
+		if m.focusedArea == focusTx && m.txHScroll < m.txMaxScroll(
+			m.visibleTxs(),
+			m.panelRowWidth(),
+			m.isCompact(),
+		) {
+			m.txHScroll++
 		}
 		return m, nil
 	case "1", "2", "3":
