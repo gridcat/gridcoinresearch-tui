@@ -6,6 +6,15 @@ import (
 )
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While the "too small" notice hides the screen, keys would act on a
+	// modal or list the user can't see (an Enter could confirm a send), so
+	// only Ctrl+C gets through.
+	if m.tooSmall() {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	switch m.mode {
 	case modeSend:
 		return m.handleSendKey(msg)

@@ -6,6 +6,20 @@ import (
 	"github.com/gridcat/gridcoinresearch-tui/internal/ui"
 )
 
+// minWidth and minHeight are the smallest terminal the TUI draws in. Below
+// either one every screen is swapped for a "too small" notice (see
+// renderTooSmall) and keys other than Ctrl+C are ignored.
+const (
+	minWidth  = 42
+	minHeight = 24
+)
+
+// tooSmall reports whether the terminal is under the minimum size. A zero
+// width means no WindowSizeMsg has arrived yet, which is "unknown", not small.
+func (m Model) tooSmall() bool {
+	return m.width > 0 && (m.width < minWidth || m.height < minHeight)
+}
+
 // bodyHeight is the vertical budget (in rows) the two scrollable panels share:
 // the terminal height minus the three fixed boxes. It takes the already-rendered
 // boxes so the only caller with them in hand (renderDashboard) doesn't re-render

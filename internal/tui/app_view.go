@@ -19,7 +19,13 @@
 //     don't allocate a fresh Style struct on each frame.
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"fmt"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/gridcat/gridcoinresearch-tui/internal/theme"
+	"github.com/gridcat/gridcoinresearch-tui/internal/ui"
+)
 
 // View is Bubble Tea's "render a frame" hook. We dispatch to a modal
 // renderer if one is open, otherwise fall through to the main dashboard.
@@ -28,6 +34,9 @@ import "github.com/charmbracelet/lipgloss"
 func (m Model) View() string {
 	if m.width == 0 {
 		return "starting…"
+	}
+	if m.tooSmall() {
+		return m.renderTooSmall()
 	}
 
 	switch m.mode {
@@ -86,4 +95,22 @@ func (m Model) renderDashboard() string {
 	txs := m.renderTxList(txHeight)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, stats, addrs, txs, footer)
+}
+
+// renderTooSmall replaces every screen while the terminal is under
+// minWidth×minHeight. It has to survive any size, down to a single cell, so
+// each line is cut to the width and lines past the height are dropped rather
+// than left for the terminal to wrap.
+func (m Model) renderTooSmall() string {
+	lines := []string{
+		theme.Warn.Render(ui.Truncate("Terminal too small", m.width)),
+		"",
+		theme.Muted.Render(ui.Truncate(fmt.Sprintf("needs %d×%d", minWidth, minHeight), m.width)),
+		theme.Muted.Render(ui.Truncate(fmt.Sprintf("now %d×%d", m.width, m.height), m.width)),
+	}
+	if len(lines) > m.height {
+		lines = lines[:m.height]
+	}
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+		lipgloss.JoinVertical(lipgloss.Center, lines...))
 }
