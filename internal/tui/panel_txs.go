@@ -196,7 +196,12 @@ func (m Model) renderTxList(height int, compact bool) string {
 		return box(theme.Muted.Render("no transactions yet"))
 	}
 
-	maxRows, _ := ui.ListWindow(height, m.txCursor, len(m.txs))
+	header := txHeaderShown(height)
+	listHeight := height
+	if header {
+		listHeight--
+	}
+	maxRows, _ := ui.ListWindow(listHeight, m.txCursor, len(m.txs))
 	offset := m.txWindowOffset(maxRows)
 	end := offset + maxRows
 	if end > len(m.txs) {
@@ -211,13 +216,34 @@ func (m Model) renderTxList(height int, compact bool) string {
 	if hoff > maxScroll {
 		hoff = maxScroll
 	}
+	// The position counter and ←/→ hint: in the bottom border in the compact
+	// layout, at the right end of the header row in the full one (where the
+	// address panel shows its own next to the tabs).
+	status := ""
 	if compact {
 		footer = fmt.Sprintf("%d/%d", m.txCursor+1, len(m.txs))
 		if maxScroll > 0 {
 			footer = "←/→ " + footer
 		}
+	} else {
+		if len(m.txs) > maxRows {
+			status = fmt.Sprintf("%d/%d", m.txCursor+1, len(m.txs))
+		}
+		if m.focusedArea == focusTx && maxScroll > 0 {
+			status = strings.TrimSpace(status + "  ←/→")
+		}
 	}
 	var lines []string
+	if header {
+		labels := false
+		for _, tx := range m.txs[offset:end] {
+			if tx.Address != "" && m.addressLabel(tx.Address) != "" {
+				labels = true
+				break
+			}
+		}
+		lines = append(lines, txHeaderRow(compact, labels, rowWidth, hoff, status))
+	}
 	for i := offset; i < end; i++ {
 		prefix := "  "
 		// A missing cache entry yields "", the same value as a lookup that
@@ -239,6 +265,67 @@ func (m Model) renderTxList(height int, compact bool) string {
 		lines = append(lines, prefix+line)
 	}
 	return box(strings.Join(lines, "\n"))
+}
+
+// txHeaderShown reports whether a Transactions box of the given height has
+// room for the column titles. They take a row, so a box that fits only one
+// row keeps it for a transaction. txListRows uses the same test so the key
+// handlers and the renderer agree on how many rows are visible.
+func txHeaderShown(height int) bool {
+	return height-2 >= 2
+}
+
+// txHeaderRow is the column-title row above the transactions. Each title is
+// placed over its column at the same horizontal offset as the rows, so the
+// titles pan with the list; one that doesn't fully fit in view is left out
+// rather than cut. status (the counter and ←/→ hint) is pinned to the right
+// end and doesn't pan. labels adds the Label title, which only makes sense
+// when a visible row has a label.
+func txHeaderRow(compact, labels bool, rowWidth, hoff int, status string) string {
+	// The column widths of txCompactSegments and txRowSegments; the first
+	// 2 columns are the icon and its space, and the 2-wide untitled ones are
+	// the gaps between columns.
+	type col struct {
+		title string
+		width int
+		right bool
+	}
+	cols := []col{{"", 2, false}, {"Status", 10, false}, {"Amount", 18, true}, {"", 2, false},
+		{"Address", 16, false}, {"", 2, false}, {"Time", 12, false}, {"", 2, false}, {"Category", 10, false}}
+	if labels {
+		cols = append(cols, col{"", 2, false}, col{"Label", 5, false})
+	}
+	if compact {
+		cols = []col{{"", 2, false}, {"Amount", 13, true}, {"", 2, false}, {"Age", 6, true}, {"", 2, false}, {"Address", 7, false}}
+	}
+
+	width := rowWidth
+	if status != "" {
+		width -= runewidth.StringWidth(status) + 2
+	}
+	// A panned row spends its first column on the ‹ marker, which shifts
+	// everything after it right by one; the titles follow.
+	lead := 0
+	if hoff > 0 {
+		lead = 1
+	}
+	buf := []byte(strings.Repeat(" ", max(width, 0)))
+	x := 0
+	for _, c := range cols {
+		start := x
+		if c.right {
+			start += c.width - len(c.title)
+		}
+		if pos := start - hoff + lead; c.title != "" && pos >= lead && pos+len(c.title) <= width {
+			copy(buf[pos:], c.title)
+		}
+		x += c.width
+	}
+	line := theme.Label.Render(string(buf))
+	if status != "" {
+		line += "  " + theme.Muted.Render(status)
+	}
+	return "  " + line
 }
 
 // txSegments builds a row of the dashboard list, filling in the cached

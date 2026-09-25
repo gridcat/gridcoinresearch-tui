@@ -230,3 +230,31 @@ func TestTxHorizontalScroll(t *testing.T) {
 		t.Errorf("rows that fit should not pan, txHScroll = %d", got)
 	}
 }
+
+// TestTxHeaderRow checks the column titles sit on the first row of the
+// Transactions box and cost exactly one transaction row, and that a box with
+// room for only one row keeps it for a transaction instead.
+func TestTxHeaderRow(t *testing.T) {
+	m := narrowTxModel(120)
+	lines := strings.Split(m.renderTxList(8, false), "\n")
+	if !strings.Contains(lines[1], "Status") || !strings.Contains(lines[1], "Amount") {
+		t.Errorf("first row should hold the column titles, got %q", lines[1])
+	}
+	// 8 rows: 2 borders, the titles, 5 transactions.
+	if got := strings.Count(strings.Join(lines, "\n"), "GRC"); got != 5 {
+		t.Errorf("box of 8 shows %d transactions, want 5", got)
+	}
+
+	lines = strings.Split(m.renderTxList(3, false), "\n")
+	if strings.Contains(lines[1], "Amount") || !strings.Contains(lines[1], "GRC") {
+		t.Errorf("a one-row box should show a transaction, got %q", lines[1])
+	}
+
+	// The key handlers size the window with txListRows; it has to agree with
+	// the renderer or the cursor can walk off the visible rows.
+	m.height = 40
+	view := m.View()
+	if got, want := strings.Count(view, "GRC"), m.txListRows(); got != want {
+		t.Errorf("dashboard shows %d transactions, txListRows says %d", got, want)
+	}
+}

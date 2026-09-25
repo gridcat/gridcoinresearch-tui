@@ -178,6 +178,9 @@ func (m Model) txListRows() int {
 			txHeight = 3
 		}
 	}
+	if txHeaderShown(txHeight) {
+		txHeight--
+	}
 	maxRows, _ := ui.ListWindow(txHeight, 0, len(m.txs))
 	return maxRows
 }
