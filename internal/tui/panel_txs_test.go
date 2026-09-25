@@ -189,7 +189,7 @@ func narrowTxModel(width int) Model {
 func TestTxListNeverWraps(t *testing.T) {
 	for _, width := range []int{40, 60, 80, 100, 140} {
 		m := narrowTxModel(width)
-		out := m.renderTxList(8)
+		out := m.renderTxList(8, false)
 		if got := lipgloss.Height(out); got != 8 {
 			t.Errorf("width %d: panel height = %d, want 8", width, got)
 		}
@@ -205,10 +205,12 @@ func TestTxHorizontalScroll(t *testing.T) {
 	right := tea.KeyMsg{Type: tea.KeyRight}
 	left := tea.KeyMsg{Type: tea.KeyLeft}
 
-	m := narrowTxModel(60)
-	max := m.txMaxScroll(m.txs, m.panelRowWidth())
+	// 80 columns is still the full layout (see compactFor), whose labelled
+	// rows run to ~96 columns.
+	m := narrowTxModel(80)
+	max := m.txMaxScroll(m.txs, m.panelRowWidth(), false)
 	if max == 0 {
-		t.Fatal("a 60-column terminal should need to pan a labelled row")
+		t.Fatal("an 80-column terminal should need to pan a labelled row")
 	}
 	for i := 0; i < max+5; i++ {
 		next, _ := m.handleKey(right)

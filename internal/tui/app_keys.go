@@ -157,7 +157,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focusedArea == focusTx && m.txHScroll > 0 {
 			// Pull a stale offset (the terminal grew since) back into range
 			// first so the key never looks dead.
-			if max := m.txMaxScroll(m.visibleTxs(), m.panelRowWidth()); m.txHScroll > max {
+			if max := m.txMaxScroll(
+				m.visibleTxs(),
+				m.panelRowWidth(),
+				m.isCompact(),
+			); m.txHScroll > max {
 				m.txHScroll = max
 			}
 			if m.txHScroll > 0 {
@@ -169,7 +173,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focusedArea == focusAddr && m.addrHScroll < m.addrMaxScroll(m.visibleAddresses(), m.panelRowWidth()) {
 			m.addrHScroll++
 		}
-		if m.focusedArea == focusTx && m.txHScroll < m.txMaxScroll(m.visibleTxs(), m.panelRowWidth()) {
+		if m.focusedArea == focusTx && m.txHScroll < m.txMaxScroll(
+			m.visibleTxs(),
+			m.panelRowWidth(),
+			m.isCompact(),
+		) {
 			m.txHScroll++
 		}
 		return m, nil

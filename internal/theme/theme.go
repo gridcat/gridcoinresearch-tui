@@ -159,6 +159,23 @@ var (
 	TxTimeCol   = lipgloss.NewStyle().Width(12)
 )
 
+// Status glyphs for the compact dashboard, where icons replace words. They
+// are single-width symbols, never emoji, because terminals disagree on how
+// wide an emoji is. Keeping them together here means a limited character set
+// can swap them all for plain letters in one place.
+const (
+	GlyphOn       = "●" // staking, network badge
+	GlyphOff      = "○" // not staking, unencrypted
+	GlyphLocked   = "■"
+	GlyphUnlocked = "◐"
+	GlyphCruncher = "★"
+	GlyphInvestor = "☆"
+	GlyphPeers    = "⇅"
+	GlyphUpdate   = "↑"
+	GlyphError    = "✗"
+	GlyphTab      = "⇥"
+)
+
 func init() { ApplyScheme(DefaultScheme) }
 
 const (

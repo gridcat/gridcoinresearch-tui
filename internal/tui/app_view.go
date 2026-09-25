@@ -85,14 +85,17 @@ func (m Model) renderDashboard() string {
 	// Reuse the boxes we just rendered to measure the budget rather than
 	// re-rendering them inside availableBodyHeight() every frame.
 	available := m.bodyHeight(header, stats, footer)
+	if m.compactFor(available) {
+		return m.renderCompactDashboard()
+	}
 	addrCap := m.addrPanelHeight(available)
-	addrs := m.renderAddresses(addrCap)
+	addrs := m.renderAddresses(addrCap, false)
 
 	txHeight := available - lipgloss.Height(addrs)
 	if txHeight < 3 {
 		txHeight = 3
 	}
-	txs := m.renderTxList(txHeight)
+	txs := m.renderTxList(txHeight, false)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, stats, addrs, txs, footer)
 }

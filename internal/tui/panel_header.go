@@ -44,6 +44,17 @@ func fetchPeers(c *rpc.Client) tea.Cmd {
 	}
 }
 
+// networkMismatch is the warning shown in place of the network badge when
+// the daemon runs on the other network than the TUI was started for, or "".
+func (m Model) networkMismatch() string {
+	if m.chain.Chain == "test" && !m.cfg.Testnet {
+		return "✗ daemon is TESTNET, TUI is mainnet"
+	} else if m.chain.Chain == "main" && m.cfg.Testnet {
+		return "✗ daemon is MAINNET, TUI is testnet"
+	}
+	return ""
+}
+
 // renderHeader draws the top bar: program name on the left, network badge
 // in the middle, current block height right-aligned. We measure the two
 // rendered halves with lipgloss.Width and pad the gap with spaces so the
@@ -55,10 +66,8 @@ func (m Model) renderHeader() string {
 	if m.cfg.Testnet {
 		networkBadge = theme.TestnetBadge.Render("● testnet")
 	}
-	if m.chain.Chain == "test" && !m.cfg.Testnet {
-		networkBadge = theme.Bad.Render("✗ daemon is TESTNET, TUI is mainnet")
-	} else if m.chain.Chain == "main" && m.cfg.Testnet {
-		networkBadge = theme.Bad.Render("✗ daemon is MAINNET, TUI is testnet")
+	if warn := m.networkMismatch(); warn != "" {
+		networkBadge = theme.Bad.Render(warn)
 	}
 
 	name := m.walletName()

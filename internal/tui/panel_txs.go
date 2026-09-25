@@ -1,15 +1,19 @@
 package tui
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/gridcat/gridcoinresearch-tui/internal/format"
 	"github.com/gridcat/gridcoinresearch-tui/internal/rpc"
 	"github.com/gridcat/gridcoinresearch-tui/internal/theme"
 	"github.com/gridcat/gridcoinresearch-tui/internal/ui"
+	"github.com/mattn/go-runewidth"
 )
 
 // txRefreshDepth is how many blocks back listsinceblock holds its cursor,
@@ -164,7 +168,11 @@ func mergeTransactions(existing, delta []rpc.Transaction) ([]rpc.Transaction, bo
 //	maxRows: how many data rows fit inside the box this frame
 //
 // We slide offset just enough to keep the cursor in view.
-func (m Model) renderTxList(height int) string {
+//
+// compact is the narrow-terminal dashboard (see renderCompactDashboard): rows
+// drop to icon, amount, age and counterparty, and the position counter moves
+// into the bottom border so it costs no row.
+func (m Model) renderTxList(height int, compact bool) string {
 	border := theme.Border
 	if m.focusedArea == focusTx {
 		border = theme.BorderFocused
@@ -174,8 +182,9 @@ func (m Model) renderTxList(height int) string {
 	if m.focusedArea == focusTx {
 		titleStyle = theme.Accent
 	}
+	footer := ""
 	box := func(content string) string {
-		return ui.TitledBox(boxStyle, titleStyle, "Transactions", content)
+		return ui.TitledBoxFooter(boxStyle, titleStyle, "Transactions", footer, content)
 	}
 	if !m.txsLoaded {
 		return box(theme.Muted.Render("loading…"))
@@ -198,8 +207,15 @@ func (m Model) renderTxList(height int) string {
 	// the top of the frame. Same clamp as the address panel's pan.
 	rowWidth := m.panelRowWidth()
 	hoff := m.txHScroll
-	if max := m.txMaxScroll(m.txs[offset:end], rowWidth); hoff > max {
-		hoff = max
+	maxScroll := m.txMaxScroll(m.txs[offset:end], rowWidth, compact)
+	if hoff > maxScroll {
+		hoff = maxScroll
+	}
+	if compact {
+		footer = fmt.Sprintf("%d/%d", m.txCursor+1, len(m.txs))
+		if maxScroll > 0 {
+			footer = "←/→ " + footer
+		}
 	}
 	var lines []string
 	for i := offset; i < end; i++ {
@@ -210,7 +226,7 @@ func (m Model) renderTxList(height int) string {
 		// or a contract the daemon itself could not classify. Only the
 		// detail modal needs to tell the two apart.
 		tx := m.txs[i]
-		line := ui.ClipSegments(m.txSegments(tx), hoff, rowWidth)
+		line := ui.ClipSegments(m.txSegments(tx, compact, rowWidth), hoff, rowWidth)
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
 			// tx list leaves the cursor as a silent bookmark, symmetric
@@ -225,10 +241,62 @@ func (m Model) renderTxList(height int) string {
 	return box(strings.Join(lines, "\n"))
 }
 
-// txSegments is txRowSegments for a row of the dashboard list, filling in the
-// cached contract type and the saved counterparty label.
-func (m Model) txSegments(tx rpc.Transaction) []ui.Seg {
-	return txRowSegments(tx, m.anonymous, m.txContracts[tx.TxID], m.addressLabel(tx.Address))
+// txSegments builds a row of the dashboard list, filling in the cached
+// contract type and the saved counterparty label. rowWidth only matters in
+// compact mode, where the counterparty column takes whatever is left.
+func (m Model) txSegments(tx rpc.Transaction, compact bool, rowWidth int) []ui.Seg {
+	contractType, label := m.txContracts[tx.TxID], m.addressLabel(tx.Address)
+	if compact {
+		return txCompactSegments(tx, m.anonymous, contractType, label, rowWidth)
+	}
+	return txRowSegments(tx, m.anonymous, contractType, label)
+}
+
+// txCompactSegments is the narrow-terminal row: icon, amount without the
+// " GRC" unit, age, then the saved label or the short address in whatever
+// width is left. Status and category columns are dropped; the icon carries the
+// status and the detail modal has the rest.
+func txCompactSegments(tx rpc.Transaction, anonymous bool, contractType, label string, rowWidth int) []ui.Seg {
+	st := format.ClassifyTransaction(tx)
+	iconStyle, ok := theme.TxKindStyle[st.Kind]
+	if !ok {
+		iconStyle = theme.Muted
+	}
+	amount, amountStyle := txAmount(tx, anonymous)
+	amount = strings.TrimSpace(strings.TrimSuffix(amount, " GRC"))
+	// Pad to the column but never cut: a clipped amount would read as a
+	// different number. A rare wider one just pushes its row's tail right.
+	if runewidth.StringWidth(amount) < 13 {
+		amount = ui.FixedCell(amount, 13, true)
+	}
+	party := format.ShortAddress(format.SanitizeTerminal(txCounterparty(tx, contractType)))
+	if tx.Address != "" && label != "" {
+		party = format.SanitizeTerminal(label)
+	}
+	// icon, space, amount 13, gap 2, age 6, gap 2 = 25 columns before it.
+	partyWidth := rowWidth - 25
+	if partyWidth < 10 {
+		partyWidth = 10
+	}
+	return []ui.Seg{{Text: st.Icon, Style: iconStyle}, {Text: " ", Style: theme.Muted},
+		{Text: amount, Style: amountStyle}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(compactAge(tx.Time), 6, true), Style: theme.Muted}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.Truncate(party, partyWidth), Style: theme.TxAddrCol.UnsetWidth()}}
+}
+
+// compactAge is FormatRelativeTime squeezed into 6 columns: "5m", "3d",
+// "now", and "Jan 26" (month and year) once it is older than a week.
+func compactAge(ts int64) string {
+	age := format.FormatRelativeTime(ts)
+	switch {
+	case age == "just now":
+		return "now"
+	case strings.HasSuffix(age, " ago"):
+		return strings.TrimSuffix(age, " ago")
+	case ts > 0:
+		return time.Unix(ts, 0).Format("Jan 06")
+	}
+	return age
 }
 
 // renderTxRow renders one transaction line. contractType is the cached
@@ -249,6 +317,42 @@ func renderTxRowLabeled(tx rpc.Transaction, anonymous bool, contractType, label 
 	return b.String()
 }
 
+// txAmount is a row's signed amount and its colour: red out, green in,
+// masked and muted in anonymous mode.
+func txAmount(tx rpc.Transaction, anonymous bool) (string, lipgloss.Style) {
+	if anonymous {
+		return format.MaskedAmount, theme.Muted
+	}
+	switch {
+	case tx.Amount < 0:
+		return format.FormatGRC(tx.Amount), theme.Warn
+	case tx.Amount > 0:
+		return format.FormatGRC(tx.Amount), theme.Good
+	}
+	return format.FormatGRC(tx.Amount), theme.Value
+}
+
+// txCounterparty is what a row shows in its address column: the address, or
+// "(stake)" / "(vote)" etc. for the transactions that have none. Unsanitized;
+// callers sanitize before measuring.
+func txCounterparty(tx rpc.Transaction, contractType string) string {
+	if tx.Address == "" && (tx.Category == "generate" || tx.Category == "immature") {
+		return "(stake)"
+	}
+	if format.IsContractCandidate(tx) {
+		// A beacon or vote has no counterparty address, so this column would
+		// otherwise be blank and the row would read as broken data. Name the
+		// contract instead. Every label stays under ShortAddress's 12-char
+		// eliding threshold ("(sidestake)", the longest of the daemon's
+		// contract types, is 11), so these pass through it unaltered.
+		if contractType == "" {
+			contractType = "contract"
+		}
+		return "(" + contractType + ")"
+	}
+	return tx.Address
+}
+
 // txRowSegments builds the coloured runs for a transaction row. The optional
 // saved label is its own final column and is shortened to preserve the table's
 // compact, single-line layout.
@@ -258,35 +362,8 @@ func txRowSegments(tx rpc.Transaction, anonymous bool, contractType, label strin
 	if !ok {
 		iconStyle = theme.Muted
 	}
-	var amount string
-	amountStyle := theme.Value
-	if anonymous {
-		amount = format.MaskedAmount
-		amountStyle = theme.Muted
-	} else {
-		switch {
-		case tx.Amount < 0:
-			amountStyle = theme.Warn
-		case tx.Amount > 0:
-			amountStyle = theme.Good
-		}
-		amount = format.FormatGRC(tx.Amount)
-	}
-
-	addr := tx.Address
-	if addr == "" && (tx.Category == "generate" || tx.Category == "immature") {
-		addr = "(stake)"
-	} else if format.IsContractCandidate(tx) {
-		// A beacon or vote has no counterparty address, so this column would
-		// otherwise be blank and the row would read as broken data. Name the
-		// contract instead. Every label stays under ShortAddress's 12-char
-		// eliding threshold ("(sidestake)", the longest of the daemon's
-		// contract types, is 11), so these pass through it unaltered.
-		if contractType == "" {
-			contractType = "contract"
-		}
-		addr = "(" + contractType + ")"
-	}
+	amount, amountStyle := txAmount(tx, anonymous)
+	addr := txCounterparty(tx, contractType)
 	// Every cell is padded to its column width by FixedCell, so the styles
 	// carry colour only: a style Width() would re-pad a cell that
 	// ClipSegments cut short and push the row past the panel edge.
