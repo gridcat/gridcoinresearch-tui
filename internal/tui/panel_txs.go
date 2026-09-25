@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/gridcat/gridcoinresearch-tui/internal/format"
 	"github.com/gridcat/gridcoinresearch-tui/internal/rpc"
 	"github.com/gridcat/gridcoinresearch-tui/internal/theme"
@@ -190,8 +189,20 @@ func (m Model) renderTxList(height int) string {
 
 	maxRows, _ := ui.ListWindow(height, m.txCursor, len(m.txs))
 	offset := m.txWindowOffset(maxRows)
+	end := offset + maxRows
+	if end > len(m.txs) {
+		end = len(m.txs)
+	}
+	// Rows are clipped to the panel, never wrapped: a wrapped row would make
+	// the box taller than renderDashboard budgeted and Bubble Tea would drop
+	// the top of the frame. Same clamp as the address panel's pan.
+	rowWidth := m.panelRowWidth()
+	hoff := m.txHScroll
+	if max := m.txMaxScroll(m.txs[offset:end], rowWidth); hoff > max {
+		hoff = max
+	}
 	var lines []string
-	for i := offset; i < offset+maxRows && i < len(m.txs); i++ {
+	for i := offset; i < end; i++ {
 		prefix := "  "
 		// A missing cache entry yields "", the same value as a lookup that
 		// came back with no type. The row renders both as a generic
@@ -199,7 +210,7 @@ func (m Model) renderTxList(height int) string {
 		// or a contract the daemon itself could not classify. Only the
 		// detail modal needs to tell the two apart.
 		tx := m.txs[i]
-		line := renderTxRowLabeled(tx, m.anonymous, m.txContracts[tx.TxID], m.addressLabel(tx.Address))
+		line := ui.ClipSegments(m.txSegments(tx), hoff, rowWidth)
 		if i == m.txCursor && m.focusedArea == focusTx {
 			// Highlight only the focused panel's cursor row. An unfocused
 			// tx list leaves the cursor as a silent bookmark, symmetric
@@ -207,11 +218,17 @@ func (m Model) renderTxList(height int) string {
 			// whole row via fillBackground (the same edge-to-edge highlight
 			// the addresses panel uses).
 			prefix = theme.Accent.Background(theme.ColorRowSelected).Render("▸ ")
-			line = ui.FillBackground(line, m.panelRowWidth())
+			line = ui.FillBackground(line, rowWidth)
 		}
 		lines = append(lines, prefix+line)
 	}
 	return box(strings.Join(lines, "\n"))
+}
+
+// txSegments is txRowSegments for a row of the dashboard list, filling in the
+// cached contract type and the saved counterparty label.
+func (m Model) txSegments(tx rpc.Transaction) []ui.Seg {
+	return txRowSegments(tx, m.anonymous, m.txContracts[tx.TxID], m.addressLabel(tx.Address))
 }
 
 // renderTxRow renders one transaction line. contractType is the cached
@@ -242,16 +259,16 @@ func txRowSegments(tx rpc.Transaction, anonymous bool, contractType, label strin
 		iconStyle = theme.Muted
 	}
 	var amount string
-	amountStyle := theme.Value.Width(18).Align(lipgloss.Right)
+	amountStyle := theme.Value
 	if anonymous {
 		amount = format.MaskedAmount
-		amountStyle = theme.Muted.Width(18).Align(lipgloss.Right)
+		amountStyle = theme.Muted
 	} else {
 		switch {
 		case tx.Amount < 0:
-			amountStyle = theme.Warn.Width(18).Align(lipgloss.Right)
+			amountStyle = theme.Warn
 		case tx.Amount > 0:
-			amountStyle = theme.Good.Width(18).Align(lipgloss.Right)
+			amountStyle = theme.Good
 		}
 		amount = format.FormatGRC(tx.Amount)
 	}
@@ -270,13 +287,17 @@ func txRowSegments(tx rpc.Transaction, anonymous bool, contractType, label strin
 		}
 		addr = "(" + contractType + ")"
 	}
+	// Every cell is padded to its column width by FixedCell, so the styles
+	// carry colour only: a style Width() would re-pad a cell that
+	// ClipSegments cut short and push the row past the panel edge.
+	//
 	// Sanitized after the label is assembled, so the daemon-supplied contract
 	// type is covered along with tx.Address, and before ShortAddress so its
 	// length check counts the characters that will actually be printed.
 	segs := []ui.Seg{{Text: st.Icon, Style: iconStyle}, {Text: " ", Style: theme.Muted},
-		{Text: ui.FixedCell(st.Label, 10, false), Style: theme.TxStatusCol}, {Text: ui.FixedCell(amount, 18, true), Style: amountStyle}, {Text: "  ", Style: theme.Muted},
-		{Text: ui.FixedCell(format.ShortAddress(format.SanitizeTerminal(addr)), 16, false), Style: theme.TxAddrCol}, {Text: "  ", Style: theme.Muted},
-		{Text: ui.FixedCell(format.FormatRelativeTime(tx.Time), 12, false), Style: theme.TxTimeCol.Foreground(theme.ColorMuted)}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(st.Label, 10, false), Style: theme.TxStatusCol.UnsetWidth()}, {Text: ui.FixedCell(amount, 18, true), Style: amountStyle}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(format.ShortAddress(format.SanitizeTerminal(addr)), 16, false), Style: theme.TxAddrCol.UnsetWidth()}, {Text: "  ", Style: theme.Muted},
+		{Text: ui.FixedCell(format.FormatRelativeTime(tx.Time), 12, false), Style: theme.TxTimeCol.UnsetWidth().Foreground(theme.ColorMuted)}, {Text: "  ", Style: theme.Muted},
 		{Text: ui.FixedCell(format.SanitizeTerminal(tx.Category), 10, false), Style: theme.Muted}}
 	if tx.Address != "" && label != "" {
 		// Keep the label column compact but give names substantially more room

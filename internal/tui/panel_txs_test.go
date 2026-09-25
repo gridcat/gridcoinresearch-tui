@@ -6,9 +6,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/gridcat/gridcoinresearch-tui/internal/rpc"
 )
 
@@ -156,5 +159,72 @@ func TestRenderTxRowContract(t *testing.T) {
 	}
 	if strings.Contains(out, "(contract)") {
 		t.Errorf("payment row must not be labelled a contract, got:\n%s", out)
+	}
+}
+
+// narrowTxModel is a dashboard whose tx list is full of labelled payments,
+// the widest row the Transactions panel draws (~96 columns), at the given
+// terminal width. The list must overfill the panel: a wrapped row only
+// pushes the box taller once there is no blank padding left to absorb it.
+func narrowTxModel(width int) Model {
+	addr := "SGrcPayeeAddr9x8y7z6w5v4u3t2s1rQpZ"
+	txs := make([]rpc.Transaction, 20)
+	for i := range txs {
+		txs[i] = rpc.Transaction{Category: "send", Amount: -1234.5, Address: addr, TxID: fmt.Sprint(i), Confirmations: 100}
+	}
+	return Model{
+		width:       width,
+		height:      30,
+		focusedArea: focusTx,
+		txsLoaded:   true,
+		txs:         txs,
+		addresses:   []rpc.ReceivedAddress{{Address: addr, Label: "stamp.gridcoin.club"}},
+	}
+}
+
+// TestTxListNeverWraps guards the bug where shrinking the terminal wrapped
+// every tx row onto two lines: the panel outgrew its budget and Bubble Tea
+// dropped the top of the dashboard. The panel must stay exactly the height it
+// was given, and no line may be wider than the terminal.
+func TestTxListNeverWraps(t *testing.T) {
+	for _, width := range []int{40, 60, 80, 100, 140} {
+		m := narrowTxModel(width)
+		out := m.renderTxList(8)
+		if got := lipgloss.Height(out); got != 8 {
+			t.Errorf("width %d: panel height = %d, want 8", width, got)
+		}
+		if got := lipgloss.Width(out); got > width {
+			t.Errorf("width %d: panel width = %d, wider than the terminal", width, got)
+		}
+	}
+}
+
+// TestTxHorizontalScroll checks ←/→ pan the focused tx list only as far as
+// the widest visible row needs, and not at all when the rows already fit.
+func TestTxHorizontalScroll(t *testing.T) {
+	right := tea.KeyMsg{Type: tea.KeyRight}
+	left := tea.KeyMsg{Type: tea.KeyLeft}
+
+	m := narrowTxModel(60)
+	max := m.txMaxScroll(m.txs, m.panelRowWidth())
+	if max == 0 {
+		t.Fatal("a 60-column terminal should need to pan a labelled row")
+	}
+	for i := 0; i < max+5; i++ {
+		next, _ := m.handleKey(right)
+		m = next.(Model)
+	}
+	if m.txHScroll != max {
+		t.Errorf("after panning past the end txHScroll = %d, want %d", m.txHScroll, max)
+	}
+	next, _ := m.handleKey(left)
+	if got := next.(Model).txHScroll; got != max-1 {
+		t.Errorf("after one ← txHScroll = %d, want %d", got, max-1)
+	}
+
+	wide := narrowTxModel(140)
+	next, _ = wide.handleKey(right)
+	if got := next.(Model).txHScroll; got != 0 {
+		t.Errorf("rows that fit should not pan, txHScroll = %d", got)
 	}
 }

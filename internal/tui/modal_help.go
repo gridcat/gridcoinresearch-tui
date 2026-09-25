@@ -31,7 +31,7 @@ func (m Model) renderHelpModal() string {
 		keyRow("PgUp PgDn", "Jump a page (also Ctrl+U / Ctrl+D)"),
 		keyRow("g G", "First / last row (also Home / End)"),
 		keyRow("Tab", "Switch focus between the two panels"),
-		keyRow("← →  h l", "Slide a too-wide address row sideways"),
+		keyRow("← →  h l", "Slide a too-wide row sideways"),
 		"",
 		theme.Title.Render("My Addresses"),
 		keyRow("1 2 3", "Show Mine, Others, or All addresses"),

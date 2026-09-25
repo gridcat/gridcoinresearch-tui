@@ -97,6 +97,33 @@ func (m Model) addrMaxScroll(addrs []rpc.ReceivedAddress, rowWidth int) int {
 	return 0
 }
 
+// txMaxScroll is addrMaxScroll for the Transactions panel. It measures only
+// the rows passed in (the visible window) rather than the whole history, since
+// View runs every frame and a long-lived wallet can hold thousands of txs.
+func (m Model) txMaxScroll(txs []rpc.Transaction, rowWidth int) int {
+	widest := 0
+	for _, tx := range txs {
+		if w := ui.SegmentsWidth(m.txSegments(tx)); w > widest {
+			widest = w
+		}
+	}
+	if max := widest - rowWidth; max > 0 {
+		return max
+	}
+	return 0
+}
+
+// visibleTxs is the slice of m.txs the Transactions panel shows this frame.
+func (m Model) visibleTxs() []rpc.Transaction {
+	maxRows := m.txListRows()
+	offset := m.txWindowOffset(maxRows)
+	end := offset + maxRows
+	if end > len(m.txs) {
+		end = len(m.txs)
+	}
+	return m.txs[offset:end]
+}
+
 // txListRows returns the number of transaction rows that fit in the current
 // dashboard layout. Key handling uses it to preserve the visible transaction
 // window between frames.
