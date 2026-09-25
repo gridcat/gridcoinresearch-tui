@@ -145,7 +145,7 @@ The wallet is only unlocked when it has to be. An unencrypted wallet, or one you
 
 ## Config panel
 
-Edits in the config panel are **session-only**: they apply immediately (the RPC client is rebuilt against the new endpoint and a fresh fetch runs) but are not written to disk. Next launch re-resolves from flags/env/conf as usual. Toggling the network auto-updates the port field if it still held the old network's default, so you don't need to remember port numbers.
+Edits in the config panel are **session-only**: they apply immediately (the RPC client is rebuilt against the new endpoint and a fresh fetch runs) but are not written to disk. Next launch re-resolves from flags/env/conf as usual. The exception is **Name**: a local label for the wallet, shown in the header's top border and as the terminal title (handy for telling Termux sessions apart). It is saved to `state.json` per network and host:port, so each wallet you run keeps its own. Toggling the network auto-updates the port field if it still held the old network's default, so you don't need to remember port numbers.
 
 The one exception is the **Peer sharing** row, which is written to disk. A consent decision the program forgets on exit is not a decision, and re-asking every launch would be nagging rather than consent.
 

@@ -316,10 +316,14 @@ func NewModel(cfg config.Config, c *rpc.Client) Model {
 		pollResultErr:     make(map[string]string),
 		send:              sendState{address: addr, amount: amt, passphrase: newPassphraseInput()},
 		sign:              signState{address: signAddr, message: signMsg, passphrase: newPassphraseInput()},
-		conf:              newConfigState(cfg, sharing == state.PeerSharingOn),
-		edit:              editLabelState{label: labelInput},
-		add:               addLabelState{address: addAddress, label: addLabel},
-		addrSearch:        addrSearch,
+		conf: newConfigState(
+			cfg,
+			sharing == state.PeerSharingOn,
+			st.Names[state.NameKey(cfg.Testnet, cfg.Host, cfg.Port)],
+		),
+		edit:       editLabelState{label: labelInput},
+		add:        addLabelState{address: addAddress, label: addLabel},
+		addrSearch: addrSearch,
 	}
 }
 

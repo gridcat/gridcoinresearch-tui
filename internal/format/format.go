@@ -13,9 +13,10 @@ import (
 	"github.com/gridcat/gridcoinresearch-tui/internal/rpc"
 )
 
-// GRC's base unit is 1e-8 GRC (like Bitcoin's satoshi), so the maximum
-// meaningful precision is 8 decimal places. Detail views use this; glance
-// views use 2 decimals to stay compact.
+// GRC's base unit is 1e-8 GRC (like Bitcoin's satoshi, but Halford),
+// (and I think Jim Owens is Halford)
+// so the maximum meaningful precision is 8 decimal places. Detail views use this;
+// glance views use 2 decimals to stay compact.
 const grcDetailDecimals = 8
 
 // MaskedAmount is the placeholder shown instead of real amounts when

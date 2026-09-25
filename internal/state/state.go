@@ -10,6 +10,10 @@
 // "you were asked and you said yes" is to remember it. So exactly one small
 // file, holding exactly the answer and the random id that goes with it.
 //
+// It also holds the local wallet names (see SetName), saved for the same
+// reason as the consent answer: nobody should have to retype a wallet's name
+// every time they start the TUI.
+//
 // Nothing here is fatal. A missing, unreadable or corrupt state file yields
 // the zero value, which means "not asked yet", the same posture readConfFile
 // takes with a missing wallet conf.
@@ -53,6 +57,22 @@ type State struct {
 	ReporterID     string `json:"reporter_id,omitempty"`
 	ConsentVersion int    `json:"consent_version,omitempty"`
 	ConsentedAt    string `json:"consented_at,omitempty"`
+	// Names holds the user's local name for each wallet, keyed by NameKey.
+	// Keyed rather than a single string because every TUI on the box shares
+	// this one file, and the point of a name is to tell those TUIs apart.
+	Names map[string]string `json:"names,omitempty"`
+}
+
+// NameKey identifies a wallet by the endpoint the TUI talks to. Two wallets
+// running side by side must differ in port (or host), so the endpoint is what
+// separates them; the network is included so a testnet and a mainnet daemon
+// that happen to share an address don't share a name either.
+func NameKey(testnet bool, host, port string) string {
+	network := "mainnet"
+	if testnet {
+		network = "testnet"
+	}
+	return network + "@" + host + ":" + port
 }
 
 // statePath returns the state file location, "" if the OS gives us nowhere
@@ -89,9 +109,10 @@ func Load() State {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return State{}
 	}
-	// A consent recorded against older wording does not carry over.
+	// A consent recorded against older wording does not carry over. Wallet
+	// names are unrelated to consent, so they are kept.
 	if s.PeerSharing == PeerSharingOn && s.ConsentVersion != ConsentVersion {
-		return State{}
+		return State{Names: s.Names}
 	}
 	return s
 }
@@ -185,6 +206,9 @@ func EnsureReporterID(prev State) State {
 // without re-reading the file.
 func RecordConsent(prev State, share bool) (State, error) {
 	next := prev
+	// Another TUI may have named its wallet since we loaded; take the names
+	// from disk so saving our answer doesn't undo theirs.
+	next.Names = Load().Names
 	next.ConsentVersion = ConsentVersion
 	next.ConsentedAt = time.Now().UTC().Format(time.RFC3339)
 	if share {
@@ -203,4 +227,32 @@ func RecordConsent(prev State, share bool) (State, error) {
 		// would quietly inflate its count of independent vantage points.
 	}
 	return next, saveState(next)
+}
+
+// SetName stores (or, for an empty name, forgets) the local name of the
+// wallet under key. It starts from the file on disk rather than from prev:
+// several TUIs share this file, and each only knows the names as they were
+// when it started. It returns prev with its names replaced by the ones just
+// saved.
+func SetName(prev State, key, name string) (State, error) {
+	disk := Load()
+	names := make(map[string]string, len(disk.Names)+1)
+	for k, v := range disk.Names {
+		names[k] = v
+	}
+	if name == "" {
+		delete(names, key)
+	} else {
+		names[key] = name
+	}
+	if len(names) == 0 {
+		names = nil
+	}
+	disk.Names = names
+	if err := saveState(disk); err != nil {
+		return prev, err
+	}
+	next := prev
+	next.Names = names
+	return next, nil
 }

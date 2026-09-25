@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gridcat/gridcoinresearch-tui/internal/config"
+	"github.com/gridcat/gridcoinresearch-tui/internal/format"
 	"github.com/gridcat/gridcoinresearch-tui/internal/rpc"
 	"github.com/gridcat/gridcoinresearch-tui/internal/state"
 	"github.com/gridcat/gridcoinresearch-tui/internal/theme"
@@ -17,7 +18,7 @@ import (
 
 func (m *Model) openConfigModal() {
 	m.mode = modeConfig
-	m.conf = newConfigState(m.cfg, m.sharingOn)
+	m.conf = newConfigState(m.cfg, m.sharingOn, m.walletName())
 	m.conf.focused = cfgFieldNetwork
 }
 
@@ -103,6 +104,21 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	}
 	m.conf.errMsg = ""
 
+	// The name is saved to disk, under the endpoint the form now points at.
+	// Only an edit is saved: changing just the port means "show me that
+	// wallet", which should bring up that wallet's own name rather than copy
+	// this one's across. This runs before anything else is applied, so a
+	// failed save can keep the modal open and show the error.
+	name := strings.TrimSpace(format.SanitizeTerminal(m.conf.name.Value()))
+	if name != m.conf.origName {
+		next, err := state.SetName(m.state, state.NameKey(m.conf.testnet, host, port), name)
+		if err != nil {
+			m.conf.errMsg = "could not save name: " + err.Error()
+			return m, nil
+		}
+		m.state = next
+	}
+
 	m.cfg.Testnet = m.conf.testnet
 	if m.conf.testnet {
 		m.cfg.NetworkName = "testnet"
@@ -140,7 +156,7 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	m.addrsErr = ""
 	m.mode = modeDashboard
 
-	// Peer sharing is the one field in this modal that IS written to disk.
+	// Peer sharing and the name above are the only fields written to disk.
 	// Everything else here is deliberately session-only (see the README), but
 	// a consent decision the program forgets on exit is not a decision, and
 	// re-asking on every launch would be nagging rather than consent.
@@ -180,7 +196,7 @@ func (m Model) applyConfig() (tea.Model, tea.Cmd) {
 	// cfg.Refresh. Starting another would leak a second self-re-arming tick (and
 	// double the refresh rate) on every Apply.
 	spin := m.bumpInflight(6)
-	return m, tea.Batch(m.refreshAllCmd(), spin)
+	return m, tea.Batch(m.refreshAllCmd(), spin, tea.SetWindowTitle(m.windowTitle()))
 }
 
 func (m Model) renderConfigModal() string {
@@ -206,6 +222,12 @@ func (m Model) renderConfigModal() string {
 	portLine := row("Port", cfgFieldPort, m.conf.port.View())
 	userLine := row("User", cfgFieldUser, m.conf.user.View())
 	refreshLine := row("Refresh", cfgFieldRefresh, m.conf.refresh.View())
+	nameLine := row("Name", cfgFieldName, m.conf.name.View())
+	nameHelp := lipgloss.JoinHorizontal(lipgloss.Top,
+		"  ",
+		theme.ConfigLabel.Render(""),
+		theme.Muted.Render("shown in the header, remembered for this host:port"),
+	)
 
 	// Peer sharing: the only row here that outlives the session. Show what it
 	// does rather than just on/off, because "Peer sharing" alone tells a user
@@ -271,6 +293,8 @@ func (m Model) renderConfigModal() string {
 		userLine,
 		passLine,
 		refreshLine,
+		nameLine,
+		nameHelp,
 		sharingLine,
 		sharingHelp,
 		"",
@@ -295,6 +319,7 @@ const (
 	cfgFieldPort
 	cfgFieldUser
 	cfgFieldRefresh
+	cfgFieldName
 	cfgFieldPeerSharing
 	cfgFieldApply
 	cfgFieldCount // sentinel: not a real field, used for modulo in tab navigation
@@ -314,9 +339,15 @@ type configState struct {
 	port    textinput.Model
 	user    textinput.Model
 	refresh textinput.Model
+	// name is the wallet's local name. Like peer sharing it IS written to
+	// disk (see applyConfig); origName is what the form opened with, so
+	// applying can tell an edit from an untouched field.
+	name     textinput.Model
+	origName string
 	// peerSharing is a boolean row toggled with space/←→, like the network
-	// row. Unlike every other field in this modal it IS written to disk when
-	// applied (see applyConfig). Consent that forgets itself is not consent.
+	// row. Like the name, and unlike every other field in this modal, it IS
+	// written to disk when applied (see applyConfig). Consent that forgets
+	// itself is not consent.
 	peerSharing bool
 	errMsg      string
 }
@@ -326,6 +357,7 @@ func (cs *configState) blurAll() {
 	cs.port.Blur()
 	cs.user.Blur()
 	cs.refresh.Blur()
+	cs.name.Blur()
 }
 
 // inputFor maps a configField enum to the pointer of the matching text
@@ -343,6 +375,8 @@ func (cs *configState) inputFor(f configField) *textinput.Model {
 		return &cs.user
 	case cfgFieldRefresh:
 		return &cs.refresh
+	case cfgFieldName:
+		return &cs.name
 	}
 	return nil
 }
@@ -350,7 +384,7 @@ func (cs *configState) inputFor(f configField) *textinput.Model {
 // newConfigState builds a fresh configState pre-populated with the values
 // currently in the live Config. Used both for the initial Model and for
 // resetting the form each time the config modal is opened.
-func newConfigState(cfg config.Config, sharingOn bool) configState {
+func newConfigState(cfg config.Config, sharingOn bool, name string) configState {
 	mk := func(value string, width int) textinput.Model {
 		ti := textinput.New()
 		ti.SetValue(value)
@@ -358,12 +392,17 @@ func newConfigState(cfg config.Config, sharingOn bool) configState {
 		ti.Width = width
 		return ti
 	}
+	nameInput := mk(name, 24)
+	nameInput.CharLimit = 24
+	nameInput.Placeholder = "e.g. orangepi-main"
 	return configState{
 		testnet:     cfg.Testnet,
 		host:        mk(cfg.Host, 30),
 		port:        mk(cfg.Port, 10),
 		user:        mk(cfg.User, 30),
 		refresh:     mk(cfg.Refresh.String(), 10),
+		name:        nameInput,
+		origName:    name,
 		peerSharing: sharingOn,
 	}
 }

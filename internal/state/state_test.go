@@ -129,3 +129,48 @@ func TestReporterIDsAreDistinct(t *testing.T) {
 		t.Error("reporter ids must not repeat")
 	}
 }
+
+// Two TUIs on one box share state.json, each started before the other named
+// its wallet. Neither save may wipe the other's name, and clearing one name
+// must leave the rest alone.
+func TestNamesAreKeyedAndSurviveOtherWriters(t *testing.T) {
+	t.Setenv("GRC_STATE_DIR", t.TempDir())
+	a := NameKey(false, "127.0.0.1", "15715")
+	b := NameKey(true, "127.0.0.1", "25715")
+
+	first, second := Load(), Load()
+	if _, err := SetName(first, a, "orangepi"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetName(second, b, "test-2"); err != nil {
+		t.Fatal(err)
+	}
+	// The first TUI answering consent with its stale copy must keep both.
+	if _, err := RecordConsent(first, false); err != nil {
+		t.Fatal(err)
+	}
+	got := Load().Names
+	if got[a] != "orangepi" || got[b] != "test-2" {
+		t.Fatalf("names = %v, want both kept", got)
+	}
+
+	if _, err := SetName(Load(), a, ""); err != nil {
+		t.Fatal(err)
+	}
+	got = Load().Names
+	if _, ok := got[a]; ok || got[b] != "test-2" {
+		t.Errorf("clearing %q should drop only it, names = %v", a, got)
+	}
+}
+
+func TestStaleConsentKeepsNames(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GRC_STATE_DIR", dir)
+	old := `{"peer_sharing":"on","consent_version":0,"names":{"mainnet@h:1":"x"}}`
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := Load().Names["mainnet@h:1"]; got != "x" {
+		t.Errorf("re-asking consent must not forget wallet names, got %q", got)
+	}
+}

@@ -125,7 +125,12 @@ func (m *Model) refreshCoreCmd() tea.Cmd {
 // the initial RPC fetches, and the spinner loop (which will self-stop
 // once all six fetches land because NewModel pre-seeded inflight=6).
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.tickCmd(), m.refreshAllCmd(), spinnerTickCmd()}
+	cmds := []tea.Cmd{
+		m.tickCmd(),
+		m.refreshAllCmd(),
+		spinnerTickCmd(),
+		tea.SetWindowTitle(m.windowTitle()),
+	}
 	if !m.cfg.NoUpdateCheck {
 		// Fire one (silent, non-manual) check shortly after launch, and arm the
 		// periodic re-check.
