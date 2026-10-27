@@ -18,7 +18,7 @@ test: go.sum
 
 lint:
 	go vet ./...
-	gofmt -l . | tee /dev/stderr | (! read)
+	gofmt -l . | tee /dev/stderr | (! read _)
 
 tidy:
 	go mod tidy
