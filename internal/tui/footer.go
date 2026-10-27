@@ -33,6 +33,8 @@ func (m Model) renderStatusBar(keys []string) string {
 	}
 	if m.paused {
 		right += theme.Warn.Render(m.pausedNote())
+	} else if m.daemonStalled() {
+		right += theme.Warn.Render(m.stallNote())
 	} else if m.inflight > 0 {
 		right += theme.Accent.Render(ui.SpinnerFrames[m.spinnerFrame])
 	}

@@ -16,9 +16,13 @@ package rpc
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
+	"sync"
 	"sync/atomic" // thread-safe counter for unique request IDs
 	"time"
 )
@@ -35,6 +39,79 @@ type Client struct {
 	// goroutines at once (Bubble Tea runs each RPC call in its own goroutine
 	// via tea.Cmd, so concurrent increments are a real possibility).
 	reqID atomic.Uint64
+
+	// pending holds every call still waiting for its response, keyed by
+	// request ID, and quietSince is when the daemon last went quiet: set when
+	// a call starts while nothing is out, cleared when a reply comes back.
+	// Together they let the TUI tell a stuck daemon from a slow one (see
+	// Pending).
+	mu         sync.Mutex
+	pending    map[uint64]*Pending
+	quietSince time.Time
+}
+
+// Pending describes one call that has not returned yet. Sent turns true once
+// the whole request has gone out over an open connection: from then on the
+// wait is the daemon's, not the network's.
+type Pending struct {
+	Method string
+	Since  time.Time
+	Sent   bool
+}
+
+// Pending returns a copy of every call still waiting, and since when the
+// daemon has not answered anything (zero while nothing is out). A call that
+// timed out does not end the quiet: the replacement call keeps counting from
+// when the daemon first went silent.
+func (c *Client) Pending() ([]Pending, time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	calls := make([]Pending, 0, len(c.pending))
+	for _, p := range c.pending {
+		calls = append(calls, *p)
+	}
+	if len(calls) == 0 {
+		return nil, time.Time{}
+	}
+	return calls, c.quietSince
+}
+
+// track registers a call as pending. setSent marks whether its request is out
+// on an open connection; done removes it, and answered says whether the
+// daemon (or the network, refusing it) replied rather than the call timing
+// out unanswered.
+func (c *Client) track(id uint64, method string) (setSent func(bool), done func(answered bool)) {
+	p := &Pending{Method: method, Since: time.Now()}
+	c.mu.Lock()
+	if c.pending == nil {
+		c.pending = make(map[uint64]*Pending)
+	}
+	if c.quietSince.IsZero() {
+		c.quietSince = p.Since
+	}
+	c.pending[id] = p
+	c.mu.Unlock()
+	setSent = func(sent bool) {
+		c.mu.Lock()
+		p.Sent = sent
+		c.mu.Unlock()
+	}
+	done = func(answered bool) {
+		c.mu.Lock()
+		delete(c.pending, id)
+		if answered {
+			// The daemon spoke, so any quiet now starts at the oldest call
+			// still out, if there is one.
+			c.quietSince = time.Time{}
+			for _, q := range c.pending {
+				if c.quietSince.IsZero() || q.Since.Before(c.quietSince) {
+					c.quietSince = q.Since
+				}
+			}
+		}
+		c.mu.Unlock()
+	}
+	return setSent, done
 }
 
 // NewClient builds a fresh client from a resolved Config. The returned
@@ -127,10 +204,11 @@ func (c *Client) Call(method string, params []any, out any) error {
 	if params == nil {
 		params = []any{} // the daemon prefers an empty array to null
 	}
+	id := c.reqID.Add(1) // returns new value after atomic increment
 	// Marshal the request envelope into JSON bytes.
 	body, err := json.Marshal(rpcRequest{
 		JSONRPC: "1.0",
-		ID:      c.reqID.Add(1), // returns new value after atomic increment
+		ID:      id,
 		Method:  method,
 		Params:  params,
 	})
@@ -143,6 +221,19 @@ func (c *Client) Call(method string, params []any, out any) error {
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
+	setSent, done := c.track(id, method)
+	answered := false
+	defer func() { done(answered) }()
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		// A dead pooled connection makes the transport retry on a fresh
+		// one, so a new dial means the request is not out yet.
+		ConnectStart: func(string, string) { setSent(false) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				setSent(true)
+			}
+		},
+	}))
 	req.Header.Set("Content-Type", "application/json")
 	// Empty credentials are valid: skip Basic auth entirely rather than sending empty values.
 	if c.user != "" && c.password != "" {
@@ -151,8 +242,13 @@ func (c *Client) Call(method string, params []any, out any) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// A refused or reset connection is an answer of sorts; only a
+		// timeout means nobody replied.
+		var netErr net.Error
+		answered = !(errors.As(err, &netErr) && netErr.Timeout())
 		return fmt.Errorf("http: %w", err)
 	}
+	answered = true
 	defer resp.Body.Close() // always close the body when this function returns
 
 	// Read one byte past the cap so we can tell "exactly at the limit" from

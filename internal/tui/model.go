@@ -143,6 +143,12 @@ type Model struct {
 	// through the frames in ui.SpinnerFrames.
 	spinnerFrame int
 
+	// ---- Stuck daemon (see daemon_stall.go) ----------------------------
+	// stall is sampled on every spinner tick; stalled says whether it
+	// counts (see samplePending).
+	stall   daemonStall
+	stalled bool
+
 	// ---- Terminal probe (see term_probe.go) ---------------------------
 	// termAnswered is set by the first probe reply; a terminal that never
 	// answers is never paused. probesUnanswered counts probes sent since the

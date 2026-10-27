@@ -189,8 +189,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// can start a fresh one, and the footer right-side goes blank.
 		if m.inflight == 0 {
 			m.spinnerRunning = false
+			m.stalled = false
 			return m, nil
 		}
+		m.samplePending(time.Time(msg))
 		m.spinnerFrame = (m.spinnerFrame + 1) % len(ui.SpinnerFrames)
 		return m, spinnerTickCmd()
 

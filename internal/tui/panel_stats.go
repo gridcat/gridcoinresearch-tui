@@ -30,6 +30,9 @@ func fetchStaking(c *rpc.Client) tea.Cmd {
 
 func (m Model) renderStats() string {
 	if !m.loaded {
+		if m.daemonStalled() {
+			return theme.Border.Width(m.width - 2).Render(theme.Warn.Render(m.stallDetail()))
+		}
 		return theme.Border.Width(m.width - 2).Render(theme.Muted.Render("loading wallet…"))
 	}
 
@@ -108,6 +111,9 @@ func (m Model) renderStats() string {
 	// Same treatment at every error line below.
 	if m.walletErr != "" {
 		content = lipgloss.JoinVertical(lipgloss.Left, content, "", theme.Bad.Render("error: "+format.SanitizeTerminal(m.walletErr)))
+	}
+	if m.daemonStalled() {
+		content = lipgloss.JoinVertical(lipgloss.Left, content, "", theme.Warn.Render(m.stallNote()))
 	}
 	return theme.Border.Width(m.width - 2).Render(content)
 }
