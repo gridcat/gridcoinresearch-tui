@@ -3,9 +3,37 @@ package ui
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/mattn/go-runewidth"
 )
+
+// StringWidth is runewidth.StringWidth with a fast path for text where no two
+// runes combine into one visible character (grapheme cluster), so the width is
+// just the sum of the rune widths. Rows are measured on every frame, and runewidth's grapheme
+// segmentation dominated the render profile even though almost every string
+// we draw is ASCII plus the odd −, … or status icon.
+func StringWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if !standaloneRune(r) {
+			return runewidth.StringWidth(s)
+		}
+		w += runewidth.RuneWidth(r)
+	}
+	return w
+}
+
+// standaloneRune reports whether r can never join a neighbour into one
+// grapheme cluster: Latin below the combining marks, and the punctuation,
+// arrow, math, box-drawing and dingbat blocks minus their marks and format
+// characters. Conservative on purpose; anything else takes the slow path.
+func standaloneRune(r rune) bool {
+	if r < 0x300 {
+		return true
+	}
+	return r >= 0x2010 && r <= 0x2bff && !unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf)
+}
 
 // SliceByCols returns the substring of Text covering visual columns [lo, hi).
 // A wide glyph that would straddle either boundary is dropped whole rather
@@ -43,7 +71,7 @@ func Truncate(Text string, maxCols int) string {
 	if maxCols <= 0 {
 		return ""
 	}
-	if runewidth.StringWidth(Text) <= maxCols {
+	if StringWidth(Text) <= maxCols {
 		return Text
 	}
 	return runewidth.Truncate(Text, maxCols, "…")
@@ -54,7 +82,7 @@ func Truncate(Text string, maxCols int) string {
 // ClipSegments needs the same column widths that the rendered row occupies.
 func FixedCell(Text string, width int, rightAlign bool) string {
 	Text = SliceByCols(Text, 0, width)
-	pad := width - runewidth.StringWidth(Text)
+	pad := width - StringWidth(Text)
 	if pad <= 0 {
 		return Text
 	}

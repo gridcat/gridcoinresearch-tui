@@ -130,6 +130,9 @@ func (m Model) Init() tea.Cmd {
 		m.refreshAllCmd(),
 		spinnerTickCmd(),
 		tea.SetWindowTitle(m.windowTitle()),
+		// Probe once now so termAnswered is known early, then every minute.
+		sendProbeCmd(),
+		probeTickCmd(),
 	}
 	if !m.cfg.NoUpdateCheck {
 		// Fire one (silent, non-manual) check shortly after launch, and arm the
@@ -158,6 +161,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		// No terminal attached (see term_probe.go): end the chain here,
+		// without fetching. termAlive starts a new one.
+		if m.paused {
+			m.tickRunning = false
+			return m, nil
+		}
 		// Anti-pileup: if the previous tick's fetches haven't all come
 		// back yet (slow daemon, big wallet), skip this tick entirely.
 		// We still re-arm the tick timer so we check again in another
@@ -252,7 +261,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onUpdateInstallMsg(msg)
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		// A key proves a terminal is attached as well as a probe reply does.
+		next, resume := m.termAlive(false)
+		model, cmd := next.handleKey(msg)
+		return model, tea.Batch(resume, cmd)
+
+	case probeTickMsg:
+		return m.onProbeTickMsg(msg)
+	}
+	if isProbeReply(msg) {
+		next, cmd := m.termAlive(true)
+		return next, cmd
 	}
 	return m, nil
 }

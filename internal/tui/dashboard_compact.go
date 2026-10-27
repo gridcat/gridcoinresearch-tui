@@ -203,12 +203,14 @@ func (m Model) renderCompactFooter() string {
 		keys += " a" + theme.GlyphOn
 	}
 	spin := " "
-	if m.inflight > 0 {
+	if m.paused {
+		spin = "paused"
+	} else if m.inflight > 0 {
 		spin = ui.SpinnerFrames[m.spinnerFrame]
 	}
 	// One leading space, the keys, then the spinner in the last column.
-	keys = ui.Truncate(keys, m.width-3)
-	pad := m.width - 2 - runewidth.StringWidth(keys)
+	keys = ui.Truncate(keys, m.width-2-runewidth.StringWidth(spin))
+	pad := m.width - 1 - runewidth.StringWidth(keys) - runewidth.StringWidth(spin)
 	if pad < 1 {
 		pad = 1
 	}

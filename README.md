@@ -70,6 +70,28 @@ export GRC_RPC_PASSWORD=mypass
 ./gridcoinresearch-tui
 ```
 
+### Inside a container
+
+If the wallet runs in Docker, run the TUI inside its container:
+
+```sh
+docker exec -it <wallet-container> gridcoinresearch-tui
+```
+
+A `docker exec -it` session outlives the ssh connection that started it. Close
+the terminal without quitting and the TUI keeps running inside the container,
+with no way of knowing you left. For a session you want to keep around, use
+`tmux`.
+
+To stop a lost session from polling the daemon forever, the TUI sends the
+terminal a device-attributes query about once a minute. Terminals answer it on
+their own, and so do tmux and screen. After three unanswered queries the TUI
+stops polling, and it starts again as soon as the terminal answers or you press
+a key. Going days without typing doesn't matter while the terminal is attached.
+If your terminal never answers the query at all, the TUI never pauses. If the
+footer shows `paused: terminal not answering since HH:MM`, your terminal stopped
+answering; press any key to resume.
+
 ### Telling networks apart
 
 Testnet paints the whole UI orange (borders, labels, values, the focused panel,
