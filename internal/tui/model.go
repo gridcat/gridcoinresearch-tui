@@ -143,6 +143,24 @@ type Model struct {
 	// through the frames in ui.SpinnerFrames.
 	spinnerFrame int
 
+	// ---- Stuck daemon (see daemon_stall.go) ----------------------------
+	// stall is sampled on every spinner tick; stalled says whether it
+	// counts (see samplePending).
+	stall   daemonStall
+	stalled bool
+
+	// ---- Terminal probe (see term_probe.go) ---------------------------
+	// termAnswered is set by the first probe reply; a terminal that never
+	// answers is never paused. probesUnanswered counts probes sent since the
+	// last reply or key. paused stops polling and pausedAt says since when.
+	// tickRunning is true while the refresh tick chain is live, so resuming
+	// can't start a second one.
+	termAnswered     bool
+	probesUnanswered int
+	paused           bool
+	pausedAt         time.Time
+	tickRunning      bool
+
 	// Which scrollable panel the arrow/page keys drive.
 	focusedArea focusArea
 
@@ -312,6 +330,7 @@ func NewModel(cfg config.Config, c *rpc.Client) Model {
 		// bumpInflight's guard honest from the first frame.
 		inflight:       6,
 		spinnerRunning: true,
+		tickRunning:    true, // Init starts the chain
 		addrMine:       make(map[string]bool),
 		txContracts:    make(map[string]string),
 		// Default the polls screen to "all polls" (incl. finished); tab narrows

@@ -92,6 +92,9 @@ func (m Model) renderCompactStats() string {
 	box := theme.Border.Width(m.width - 2)
 	title, titleStyle := m.compactTitle()
 	if !m.loaded {
+		if m.daemonStalled() {
+			return ui.TitledBox(box, titleStyle, title, theme.Warn.Width(m.width-4).Render(m.stallDetail()))
+		}
 		return ui.TitledBox(box, titleStyle, title, theme.Muted.Render("loading wallet…"))
 	}
 
@@ -144,6 +147,9 @@ func (m Model) renderCompactStats() string {
 	}
 	if m.walletErr != "" {
 		rows = append(rows, theme.Bad.Render(ui.Truncate(theme.GlyphError+" "+format.SanitizeTerminal(m.walletErr), m.width-4)))
+	}
+	if m.daemonStalled() {
+		rows = append(rows, theme.Warn.Render(ui.Truncate(m.stallNote(), m.width-4)))
 	}
 	return ui.TitledBox(box, titleStyle, title, strings.Join(rows, "\n"))
 }
@@ -202,15 +208,19 @@ func (m Model) renderCompactFooter() string {
 	if m.anonymous {
 		keys += " a" + theme.GlyphOn
 	}
-	spin := " "
-	if m.inflight > 0 {
+	spin, spinStyle := " ", theme.Accent
+	if m.paused {
+		spin = "paused"
+	} else if m.daemonStalled() {
+		spin, spinStyle = m.stallShort(), theme.Warn
+	} else if m.inflight > 0 {
 		spin = ui.SpinnerFrames[m.spinnerFrame]
 	}
 	// One leading space, the keys, then the spinner in the last column.
-	keys = ui.Truncate(keys, m.width-3)
-	pad := m.width - 2 - runewidth.StringWidth(keys)
+	keys = ui.Truncate(keys, m.width-2-runewidth.StringWidth(spin))
+	pad := m.width - 1 - runewidth.StringWidth(keys) - runewidth.StringWidth(spin)
 	if pad < 1 {
 		pad = 1
 	}
-	return " " + theme.Muted.Render(keys) + strings.Repeat(" ", pad) + theme.Accent.Render(spin)
+	return " " + theme.Muted.Render(keys) + strings.Repeat(" ", pad) + spinStyle.Render(spin)
 }

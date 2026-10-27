@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gridcat/gridcoinresearch-tui/internal/theme"
-	"github.com/mattn/go-runewidth"
 )
 
 // Seg is one coloured run of an address row. We keep rows as a list of
@@ -25,7 +24,7 @@ type Seg struct {
 func SegmentsWidth(segs []Seg) int {
 	w := 0
 	for _, s := range segs {
-		w += runewidth.StringWidth(s.Text)
+		w += StringWidth(s.Text)
 	}
 	return w
 }
@@ -62,7 +61,7 @@ func ClipSegments(segs []Seg, offset, width int) string {
 	col := 0
 	for _, seg := range segs {
 		segStart := col
-		segEnd := col + runewidth.StringWidth(seg.Text)
+		segEnd := col + StringWidth(seg.Text)
 		col = segEnd
 		if segEnd <= offset || segStart >= end {
 			continue

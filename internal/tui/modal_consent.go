@@ -139,7 +139,8 @@ func (m Model) renderConsentModal() string {
 func (m Model) onSharingTickMsg(msg sharingTickMsg) (tea.Model, tea.Cmd) {
 	// Re-arm first so nothing below can break the lineage.
 	cmds := []tea.Cmd{m.sharingTickCmd()}
-	if m.sharingOn && m.state.ReporterID != "" {
+	// Paused means no fresh getpeerinfo, so there is nothing new to report.
+	if m.sharingOn && m.state.ReporterID != "" && !m.paused {
 		// Book the next slot as we dispatch rather than when the ack
 		// lands, so a report that fails, or that never answers at all,
 		// still retries on the normal cadence. A successful ack overwrites

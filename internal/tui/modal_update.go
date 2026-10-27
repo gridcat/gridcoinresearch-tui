@@ -160,6 +160,10 @@ func (m Model) onUpdateTickMsg(msg updateTickMsg) (tea.Model, tea.Cmd) {
 	if m.cfg.NoUpdateCheck {
 		return m, nil
 	}
+	// Keep the timer while paused, but skip the GitHub call nobody would see.
+	if m.paused {
+		return m, m.updateTickCmd()
+	}
 	return m, tea.Batch(m.updateTickCmd(), checkUpdateCmd(false))
 }
 

@@ -9,6 +9,14 @@ import (
 	"github.com/gridcat/gridcoinresearch-tui/internal/ui"
 )
 
+// pausedNote replaces the spinner while polling is paused because the
+// terminal stopped answering. Normally nobody sees it. Anyone who does has a
+// terminal that is attached but ignores the probe, and the note tells them why
+// the numbers stopped updating.
+func (m Model) pausedNote() string {
+	return "paused: terminal not answering since " + m.pausedAt.Format("15:04") + " · any key resumes"
+}
+
 // renderStatusBar renders one bordered full-width bar: the key legend on the
 // left, and the refresh spinner pinned to the right while any RPC fetch is in
 // flight. Shared by the dashboard footer and the polls-screen footer so their
@@ -23,7 +31,11 @@ func (m Model) renderStatusBar(keys []string) string {
 	if m.sharingNote != "" {
 		right = theme.Muted.Render(format.SanitizeTerminal(m.sharingNote)) + "  "
 	}
-	if m.inflight > 0 {
+	if m.paused {
+		right += theme.Warn.Render(m.pausedNote())
+	} else if m.daemonStalled() {
+		right += theme.Warn.Render(m.stallNote())
+	} else if m.inflight > 0 {
 		right += theme.Accent.Render(ui.SpinnerFrames[m.spinnerFrame])
 	}
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 4

@@ -70,6 +70,28 @@ export GRC_RPC_PASSWORD=mypass
 ./gridcoinresearch-tui
 ```
 
+### Inside a container
+
+If the wallet runs in Docker, run the TUI inside its container:
+
+```sh
+docker exec -it <wallet-container> gridcoinresearch-tui
+```
+
+A `docker exec -it` session outlives the ssh connection that started it. Close
+the terminal without quitting and the TUI keeps running inside the container,
+with no way of knowing you left. For a session you want to keep around, use
+`tmux`.
+
+To stop a lost session from polling the daemon forever, the TUI sends the
+terminal a device-attributes query about once a minute. Terminals answer it on
+their own, and so do tmux and screen. After three unanswered queries the TUI
+stops polling, and it starts again as soon as the terminal answers or you press
+a key. Going days without typing doesn't matter while the terminal is attached.
+If your terminal never answers the query at all, the TUI never pauses. If the
+footer shows `paused: terminal not answering since HH:MM`, your terminal stopped
+answering; press any key to resume.
+
 ### Telling networks apart
 
 Testnet paints the whole UI orange (borders, labels, values, the focused panel,
@@ -179,6 +201,8 @@ To change your mind, press `c` and toggle **Peer sharing**, or start with `--pee
   ```
 
 ## Troubleshooting
+
+`gridcoinresearchd` opens its RPC port only after it has loaded the block index and the wallet, so while it starts, the TUI shows a connection error. If instead the footer says `daemon hasn't answered for 45s (waiting on getwalletinfo)`, the daemon took the request and has said nothing since. It is either busy with something long, such as another program's call, or stuck, and its `debug.log` shows what it did last. The TUI says so once the daemon has been quiet for 30 seconds while a dashboard call waits, and the count carries on across the 5-minute timeouts of the calls it retries. While its own address-list or transaction scan is running it stays quiet about it: those walk the whole wallet and can take minutes on a big one. `no connection to the daemon` means the connection itself never opened: check the host, the port and any firewall in between.
 
 If the TUI ever dies after a long run, it leaves your terminal in a weird state: you type but nothing echoes, even though the shell still runs what you type, often after a wall of Go stack-trace text. That means it hit a fatal Go runtime error. That kind of error exits without running the normal terminal-restore, so to get a sane shell back, run `reset` (or `stty sane`).
 

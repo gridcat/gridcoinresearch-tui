@@ -11,6 +11,10 @@
 //
 // normalizeVersion collapses both into a bare "major.minor.patch" core for
 // comparison.
+//
+// The repository also publishes plugin releases, tagged with the plugin's
+// name ("stamper/v1.0.0"). Only plain vX.Y.Z tags are wallet releases; see
+// IsWalletRelease.
 package selfupdate
 
 import (
@@ -57,13 +61,24 @@ type Asset struct {
 	URL  string `json:"browser_download_url"`
 }
 
-// Release is the trimmed GitHub "latest release" payload the updater
-// consumes. The full API response has dozens more fields we don't care about;
+// Release is the trimmed GitHub release payload the updater consumes. The
+// full API response has dozens more fields we don't care about;
 // encoding/json ignores the rest.
 type Release struct {
-	TagName string  `json:"tag_name"`
-	Body    string  `json:"body"`
-	Assets  []Asset `json:"assets"`
+	TagName    string  `json:"tag_name"`
+	Body       string  `json:"body"`
+	Assets     []Asset `json:"assets"`
+	Draft      bool    `json:"draft"`
+	Prerelease bool    `json:"prerelease"`
+}
+
+// IsWalletRelease reports whether r is a published release of the wallet
+// itself: a plain vX.Y.Z tag, not a plugin's "name/vX.Y.Z", and neither a
+// draft nor a prerelease (the same rule GitHub's /releases/latest applies).
+func IsWalletRelease(r Release) bool {
+	t := r.TagName
+	return !r.Draft && !r.Prerelease &&
+		len(t) > 1 && t[0] == 'v' && t[1] >= '0' && t[1] <= '9' && !strings.Contains(t, "/")
 }
 
 // newUpdateHTTPClient builds the short-timeout client used for every updater
@@ -79,36 +94,31 @@ func githubHeaders(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 }
 
-// FetchLatest queries GitHub for the newest published release. baseURL is
-// the API root (APIBase in production; an httptest URL in tests).
+// FetchLatest returns the newest wallet release. baseURL is the API root
+// (APIBase in production; an httptest URL in tests).
+//
+// It reads the release list rather than /releases/latest: plugin releases
+// share this repository, and GitHub's "latest" can be one of them.
 func FetchLatest(baseURL string) (Release, error) {
-	url := strings.TrimRight(baseURL, "/") + "/repos/" + Repo + "/releases/latest"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	rels, err := FetchReleases(baseURL)
 	if err != nil {
 		return Release{}, err
 	}
-	githubHeaders(req)
-
-	resp, err := newUpdateHTTPClient().Do(req)
-	if err != nil {
-		return Release{}, err
+	var latest Release
+	for _, rel := range rels {
+		if IsWalletRelease(rel) && (latest.TagName == "" || CompareSemver(rel.TagName, latest.TagName) > 0) {
+			latest = rel
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return Release{}, githubStatusError(resp)
+	if latest.TagName == "" {
+		return Release{}, fmt.Errorf("no wallet release among the %d newest releases", len(rels))
 	}
-	var rel Release
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
-		return Release{}, fmt.Errorf("decode release: %w", err)
-	}
-	if rel.TagName == "" {
-		return Release{}, fmt.Errorf("release payload had no tag_name")
-	}
-	return rel, nil
+	return latest, nil
 }
 
-// FetchReleases queries GitHub's release list. Manual update checks use this to
-// show release notes for every version between the running binary and latest.
+// FetchReleases queries GitHub's release list, newest first, plugin releases
+// included. Manual update checks use it to show release notes for every
+// version between the running binary and latest.
 func FetchReleases(baseURL string) ([]Release, error) {
 	url := strings.TrimRight(baseURL, "/") + "/repos/" + Repo + "/releases?per_page=100"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -254,7 +264,7 @@ func Missed(current string, latest Release, releases []Release) []Release {
 	out := make([]Release, 0, len(releases)+1)
 	seen := make(map[string]bool, len(releases)+1)
 	for _, rel := range releases {
-		if rel.TagName == "" || !IsNewer(rel.TagName, current) {
+		if !IsWalletRelease(rel) || !IsNewer(rel.TagName, current) {
 			continue
 		}
 		key := normalizeVersion(rel.TagName)

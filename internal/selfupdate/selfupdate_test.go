@@ -58,6 +58,8 @@ func TestIsNewer(t *testing.T) {
 func TestMissedReleases(t *testing.T) {
 	latest := Release{TagName: "v1.4.0", Body: "four"}
 	releases := []Release{
+		{TagName: "stamper/v9.0.0", Body: "plugin"},
+		{TagName: "v1.5.0-rc.1", Body: "rc", Prerelease: true},
 		{TagName: "v1.4.0", Body: "four"},
 		{TagName: "v1.3.0", Body: "three"},
 		{TagName: "v1.2.0", Body: "two"},
@@ -233,16 +235,25 @@ func TestSwapBinary(t *testing.T) {
 }
 
 func TestFetchLatestRelease(t *testing.T) {
-	rel := Release{
-		TagName: "v1.6.0",
-		Body:    "notes",
-		Assets:  []Asset{{Name: "checksums.txt", URL: "https://x/checksums.txt"}},
+	// Newest first, as GitHub lists them. Plugin releases, a prerelease and a
+	// draft are all newer than v1.6.0, and none of them is the wallet's.
+	rels := []Release{
+		{TagName: "stamper/v2.0.0"},
+		{TagName: "v1.7.0-rc.1", Prerelease: true},
+		{TagName: "v1.8.0", Draft: true},
+		{
+			TagName: "v1.6.0",
+			Body:    "notes",
+			Assets:  []Asset{{Name: "checksums.txt", URL: "https://x/checksums.txt"}},
+		},
+		{TagName: "stamper/v1.0.0"},
+		{TagName: "v1.5.0"},
 	}
 	var gotUA, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUA = r.Header.Get("User-Agent")
 		gotPath = r.URL.Path
-		_ = json.NewEncoder(w).Encode(rel)
+		_ = json.NewEncoder(w).Encode(rels)
 	}))
 	defer srv.Close()
 
@@ -256,8 +267,40 @@ func TestFetchLatestRelease(t *testing.T) {
 	if gotUA == "" {
 		t.Errorf("no User-Agent sent (GitHub rejects those)")
 	}
-	if wantPath := "/repos/" + Repo + "/releases/latest"; gotPath != wantPath {
+	if got.FindAsset("checksums.txt") == "" {
+		t.Errorf("the wallet release came back without its assets")
+	}
+	if wantPath := "/repos/" + Repo + "/releases"; gotPath != wantPath {
 		t.Errorf("request path = %q, want %q", gotPath, wantPath)
+	}
+}
+
+func TestFetchLatestWithoutWalletRelease(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]Release{{TagName: "stamper/v1.0.0"}})
+	}))
+	defer srv.Close()
+	if _, err := FetchLatest(srv.URL); err == nil {
+		t.Errorf("expected an error when only plugin releases exist")
+	}
+}
+
+func TestIsWalletRelease(t *testing.T) {
+	for tag, want := range map[string]bool{
+		"v1.6.0":         true,
+		"v10.0.0":        true,
+		"stamper/v1.0.0": false,
+		"sdk/v0.1.0":     false,
+		"vnext":          false,
+		"1.6.0":          false,
+		"":               false,
+	} {
+		if got := IsWalletRelease(Release{TagName: tag}); got != want {
+			t.Errorf("IsWalletRelease(%q) = %v, want %v", tag, got, want)
+		}
+	}
+	if IsWalletRelease(Release{TagName: "v1.6.0", Prerelease: true}) || IsWalletRelease(Release{TagName: "v1.6.0", Draft: true}) {
+		t.Error("drafts and prereleases are not published wallet releases")
 	}
 }
 
