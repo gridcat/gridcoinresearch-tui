@@ -73,3 +73,23 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           tag: v${{ needs.release.outputs.version }}
           wait-for-confirmation: false
+
+  # Rebuild the wallet Docker images so they bundle this release now
+  # instead of on the next weekly run. WALLET_IMAGES_TOKEN is a
+  # fine-grained PAT with Actions: write on gridcat/grc-wallet-images
+  # (GITHUB_TOKEN can't trigger workflows in another repo).
+  rebuild-images:
+    needs: release
+    if: needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Dispatch grc-wallet-images publish
+        env:
+          TOKEN: ${{ secrets.WALLET_IMAGES_TOKEN }}
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/gridcat/grc-wallet-images/actions/workflows/publish.yml/dispatches \
+            -d '{"ref":"master"}'
